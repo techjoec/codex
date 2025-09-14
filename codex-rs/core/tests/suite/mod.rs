@@ -1,6 +1,5 @@
 // Aggregates all former standalone integration tests as modules.
 
-mod user_shell_cmd;
 mod cli_stream;
 mod client;
 mod compact;
@@ -14,3 +13,4 @@ mod review;
 mod seatbelt;
 mod stream_error_allows_next_turn;
 mod stream_no_completed;
+mod user_shell_cmd;

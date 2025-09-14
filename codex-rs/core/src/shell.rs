@@ -133,6 +133,31 @@ fn strip_bash_lc(command: &Vec<String>) -> Option<String> {
 
 #[cfg(unix)]
 fn detect_default_user_shell() -> Shell {
+    // In tests, prefer a hermetic shell to avoid sourcing user configs.
+    // Try zsh first, then bash; use /dev/null as rc.
+    #[cfg(test)]
+    {
+        let zsh_candidates = ["/bin/zsh", "/usr/bin/zsh"];
+        for p in zsh_candidates {
+            if std::path::Path::new(p).exists() {
+                return Shell::Zsh(ZshShell {
+                    shell_path: p.to_string(),
+                    zshrc_path: "/dev/null".to_string(),
+                });
+            }
+        }
+        let bash_candidates = ["/bin/bash", "/usr/bin/bash"];
+        for p in bash_candidates {
+            if std::path::Path::new(p).exists() {
+                return Shell::Bash(BashShell {
+                    shell_path: p.to_string(),
+                    bashrc_path: "/dev/null".to_string(),
+                });
+            }
+        }
+        // Fall through to normal detection if neither shell exists.
+    }
+
     use libc::getpwuid;
     use libc::getuid;
     use std::ffi::CStr;

@@ -60,7 +60,7 @@ async fn user_shell_cmd_ls_and_cat_in_temp_dir() {
     // 2) cat the file should return exact contents
     codex
         .submit(Op::RunUserShellCommand {
-            command: format!("cat {}", file_name),
+            command: format!("cat {file_name}"),
         })
         .await
         .unwrap();

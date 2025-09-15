@@ -573,7 +573,7 @@ impl HistoryCell for CompletedMcpToolCallWithImageOutput {
 }
 
 const TOOL_CALL_MAX_LINES: usize = 5;
-const SESSION_HEADER_MAX_INNER_WIDTH: usize = 56;
+const SESSION_HEADER_MAX_INNER_WIDTH: usize = 56; // Just an eyeballed value
 
 fn title_case(s: &str) -> String {
     if s.is_empty() {
@@ -629,24 +629,24 @@ pub(crate) fn new_session_info(
             "  To get started, describe a task or try one of these commands:"
                 .dim()
                 .into(),
-            Line::from("".dim()),
+            Line::from(""),
             Line::from(vec![
-                "  ".dim(),
+                "  ".into(),
                 "/init".into(),
                 " - create an AGENTS.md file with instructions for Codex".dim(),
             ]),
             Line::from(vec![
-                "  ".dim(),
+                "  ".into(),
                 "/status".into(),
                 " - show current session configuration".dim(),
             ]),
             Line::from(vec![
-                "  ".dim(),
+                "  ".into(),
                 "/approvals".into(),
                 " - choose what Codex can do without approval".dim(),
             ]),
             Line::from(vec![
-                "  ".dim(),
+                "  ".into(),
                 "/model".into(),
                 " - choose what model and reasoning effort to use".dim(),
             ]),

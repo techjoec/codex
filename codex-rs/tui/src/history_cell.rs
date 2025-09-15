@@ -799,10 +799,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
         let model_w = UnicodeWidthStr::width(model_text_for_width_calc.as_str());
         let pad_w = inner_width.saturating_sub(model_w);
         let mut spans: Vec<Span<'static>> = vec![
-            Span::from("│").dim(),
-            Span::from(" ").dim(),
-            Span::from(model_label).dim(),
-            Span::from(" ").dim(),
+            Span::from(format!("│ {model_label} ")).dim(),
             Span::from(self.model.clone()),
             Span::from("   ").dim(),
             Span::from(CHANGE_MODEL_HINT_COMMAND).cyan(),

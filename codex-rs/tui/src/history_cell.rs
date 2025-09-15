@@ -626,24 +626,29 @@ pub(crate) fn new_session_info(
 
         // Help lines below the header (new copy and list)
         let help_lines: Vec<Line<'static>> = vec![
-            "Describe a task to get started or try one of the following commands:"
+            "  To get started, describe a task or try one of these commands:"
                 .dim()
                 .into(),
             Line::from("".dim()),
             Line::from(vec![
-                "1. ".into(),
-                "/status".bold(),
-                " - show current session configuration and token usage".dim(),
+                "  ".dim(),
+                "/init".into(),
+                " - create an AGENTS.md file with instructions for Codex".dim(),
             ]),
             Line::from(vec![
-                "2. ".into(),
-                "/compact".bold(),
-                " - compact the chat history to avoid context limits".dim(),
+                "  ".dim(),
+                "/status".into(),
+                " - show current session configuration".dim(),
             ]),
             Line::from(vec![
-                "3. ".into(),
-                "/prompts".bold(),
-                " - explore starter prompts to get to know Codex".dim(),
+                "  ".dim(),
+                "/approvals".into(),
+                " - choose what Codex can do without approval".dim(),
+            ]),
+            Line::from(vec![
+                "  ".dim(),
+                "/model".into(),
+                " - choose what model and reasoning effort to use".dim(),
             ]),
         ];
 
@@ -812,9 +817,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
         out.push(Line::from(spans));
 
         // Directory line: " Directory: <cwd>"
-        let dir_label = format!(
-            "{DIR_LABEL:<label_width$}"
-        );
+        let dir_label = format!("{DIR_LABEL:<label_width$}");
         let dir_prefix = format!(" {dir_label} ");
         let dir_max_width = inner_width.saturating_sub(UnicodeWidthStr::width(dir_prefix.as_str()));
         let dir = self.format_directory(Some(dir_max_width));

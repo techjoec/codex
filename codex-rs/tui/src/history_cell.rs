@@ -777,9 +777,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
 
         // Spacer row between title and details
         out.push(Line::from(vec![
-            Span::from("│").dim(),
-            Span::from(" ".repeat(inner_width)).dim(),
-            Span::from("│").dim(),
+            Span::from(format!("│{}|", " ".repeat(inner_width)).dim(),
         ]));
 
         // Model line: " Model: <model> (change with /model)"

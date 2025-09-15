@@ -16,8 +16,10 @@ pub(crate) struct WelcomeWidget {
 impl WidgetRef for &WelcomeWidget {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         let line = Line::from(vec![
-            ">_ ".into(),
-            "Welcome to Codex, OpenAI's command-line coding agent".bold(),
+            "  ".into(),
+            "Welcome to ".into(),
+            "Codex".bold(),
+            ", OpenAI's command-line coding agent".into(),
         ]);
         line.render(area, buf);
     }

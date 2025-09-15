@@ -137,12 +137,12 @@ impl AuthModeWidget {
     fn render_pick_mode(&self, area: Rect, buf: &mut Buffer) {
         let mut lines: Vec<Line> = vec![
             Line::from(vec![
-                "> ".into(),
-                "Sign in with ChatGPT to use Codex as part of your paid plan".bold(),
+                "  ".into(),
+                "Sign in with ChatGPT to use Codex as part of your paid plan".into(),
             ]),
             Line::from(vec![
                 "  ".into(),
-                "or connect an API key for usage-based billing".bold(),
+                "or connect an API key for usage-based billing".into(),
             ]),
             "".into(),
         ];
@@ -182,6 +182,7 @@ impl AuthModeWidget {
             "Sign in with ChatGPT",
             "Usage included with Plus, Pro, and Team plans",
         ));
+        lines.push("".into());
         lines.extend(create_mode_item(
             1,
             AuthMode::ApiKey,

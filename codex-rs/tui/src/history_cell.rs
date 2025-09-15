@@ -573,7 +573,7 @@ impl HistoryCell for CompletedMcpToolCallWithImageOutput {
 }
 
 const TOOL_CALL_MAX_LINES: usize = 5;
-const SESSION_HEADER_MAX_INNER_WIDTH: usize = 70;
+const SESSION_HEADER_MAX_INNER_WIDTH: usize = 56;
 
 fn title_case(s: &str) -> String {
     if s.is_empty() {
@@ -735,68 +735,93 @@ impl HistoryCell for SessionHeaderHistoryCell {
         top.push('╭');
         top.push_str(&"─".repeat(inner_width));
         top.push('╮');
-        out.push(Line::from(top));
+        out.push(Line::from(top.dim()));
 
         // Title line rendered inside the box: " >_ OpenAI Codex (vX)"
         let title_text = format!(" >_ OpenAI Codex (v{})", self.version);
         let title_w = UnicodeWidthStr::width(title_text.as_str());
         let pad_w = inner_width.saturating_sub(title_w);
         let mut title_spans: Vec<Span<'static>> = vec![
-            "│".into(),
-            " ".into(),
-            ">_ ".into(),
-            "OpenAI Codex".bold(),
-            " ".into(),
-            format!("(v{})", self.version).dim(),
+            Span::from("│").dim(),
+            Span::from(" ").dim(),
+            Span::from(">_ ").dim(),
+            Span::from("OpenAI Codex").bold(),
+            Span::from(" ").dim(),
+            Span::from(format!("(v{})", self.version)).dim(),
         ];
         if pad_w > 0 {
-            title_spans.push(" ".repeat(pad_w).into());
+            title_spans.push(Span::from(" ".repeat(pad_w)).dim());
         }
-        title_spans.push("│".into());
+        title_spans.push(Span::from("│").dim());
         out.push(Line::from(title_spans));
 
         // Spacer row between title and details
         out.push(Line::from(vec![
-            "│".into(),
-            " ".repeat(inner_width).into(),
-            "│".into(),
+            Span::from("│").dim(),
+            Span::from(" ".repeat(inner_width)).dim(),
+            Span::from("│").dim(),
         ]));
 
         // Model line: " Model: <model> (change with /model)"
-        const CHANGE_MODEL_HINT: &str = "(change with /model)";
-        let model_text = format!(" Model: {} {}", self.model, CHANGE_MODEL_HINT);
-        let model_w = UnicodeWidthStr::width(model_text.as_str());
+        const CHANGE_MODEL_HINT_COMMAND: &str = "/model";
+        const CHANGE_MODEL_HINT_EXPLANATION: &str = " to change";
+        const DIR_LABEL: &str = "directory:";
+        let label_width = DIR_LABEL.len();
+        let model_label = format!(
+            "{model_label:<label_width$}",
+            model_label = "model:",
+            label_width = label_width
+        );
+        let model_text_for_width_calc = format!(
+            " {model_label} {model_value}   {command}{explanation}",
+            model_value = self.model,
+            command = CHANGE_MODEL_HINT_COMMAND,
+            explanation = CHANGE_MODEL_HINT_EXPLANATION,
+        );
+        let model_w = UnicodeWidthStr::width(model_text_for_width_calc.as_str());
         let pad_w = inner_width.saturating_sub(model_w);
         let mut spans: Vec<Span<'static>> = vec![
-            "│".into(),
-            " ".into(),
-            "Model: ".bold(),
-            self.model.clone().into(),
-            " ".into(),
-            CHANGE_MODEL_HINT.dim(),
+            Span::from("│").dim(),
+            Span::from(" ").dim(),
+            Span::from(model_label).dim(),
+            Span::from(" ").dim(),
+            Span::from(self.model.clone()),
+            Span::from("   ").dim(),
+            Span::from(CHANGE_MODEL_HINT_COMMAND).cyan(),
+            Span::from(CHANGE_MODEL_HINT_EXPLANATION).dim(),
         ];
         if pad_w > 0 {
-            spans.push(" ".repeat(pad_w).into());
+            spans.push(Span::from(" ".repeat(pad_w)).dim());
         }
-        spans.push("│".into());
+        spans.push(Span::from("│").dim());
         out.push(Line::from(spans));
 
         // Directory line: " Directory: <cwd>"
         let dir = self.format_directory();
-        let dir_text = format!(" Directory: {dir}");
+        let dir_label = format!(
+            "{dir_label:<label_width$}",
+            dir_label = DIR_LABEL,
+            label_width = label_width
+        );
+        let dir_text = format!(" {dir_label} {dir}");
         let dir_w = UnicodeWidthStr::width(dir_text.as_str());
         let pad_w = inner_width.saturating_sub(dir_w);
-        let mut spans: Vec<Span<'static>> =
-            vec!["│".into(), " ".into(), "Directory: ".bold(), dir.into()];
+        let mut spans: Vec<Span<'static>> = vec![
+            Span::from("│").dim(),
+            Span::from(" ").dim(),
+            Span::from(dir_label).dim(),
+            Span::from(" ").dim(),
+            Span::from(dir),
+        ];
         if pad_w > 0 {
-            spans.push(" ".repeat(pad_w).into());
+            spans.push(Span::from(" ".repeat(pad_w)).dim());
         }
-        spans.push("│".into());
+        spans.push(Span::from("│").dim());
         out.push(Line::from(spans));
 
         // Bottom border
         let bottom = format!("╰{}╯", "─".repeat(inner_width));
-        out.push(Line::from(bottom));
+        out.push(Line::from(bottom.dim()));
 
         out
     }

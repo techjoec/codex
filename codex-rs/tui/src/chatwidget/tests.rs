@@ -782,7 +782,7 @@ async fn binary_size_transcript_snapshot() {
     // 'thinking' header if present, and start from the first non-empty content line
     // that follows. This keeps the snapshot stable across sessions.
     const MARKER_PREFIX: &str =
-        "Describe a task to get started or try one of the following commands:";
+        "To get started, describe a task or try one of these commands:";
     let last_marker_line_idx = lines
         .iter()
         .rposition(|l| l.trim_start().starts_with(MARKER_PREFIX))

@@ -87,7 +87,7 @@ const VARIANTS: &[&[&str]] = &[
     &FRAMES_SLUG,
 ];
 
-const FRAME_TICK: Duration = Duration::from_millis(60);
+const FRAME_TICK: Duration = Duration::from_millis(80);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ModelUpgradeDecision {
@@ -226,6 +226,7 @@ impl WidgetRef for &ModelUpgradePopup {
             ModelUpgradeOption::TryNewModel,
             &format!("Yes, switch me to {SWIFTFOX_MODEL_DISPLAY_NAME}"),
         ));
+        lines.push("".into());
         lines.push(create_option(
             1,
             ModelUpgradeOption::KeepCurrent,

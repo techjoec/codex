@@ -1,0 +1,8 @@
+--- a/core/src/command_safety/is_safe_command.rs
++++ b/core/src/command_safety/is_safe_command.rs
+@@
+-    Some("cat" | "nl" | "sed" | "grep" | "tail" | "head" | "wc" | ...)
++    Some("sed" | "grep" | "tail" | "head" | "wc" | ...)
+@@
++// Prohibit large full-file reads (`cat`/`nl`) on files > 4KB; suggest read_code(path,[a,b]).
++// Wrap build tools (gradle|npm|pnpm|yarn|cargo|mvn) to tee logs and tail 120 lines.

@@ -1,0 +1,23 @@
+--- a/core/src/openai_tools.rs
++++ b/core/src/openai_tools.rs
+@@
++pub fn create_read_code_tool() -> ResponsesApiTool {
++    ResponsesApiTool {
++        name: "read_code".into(),
++        description: "Read small code slices by line range or symbol.",
++        strict: true,
++        parameters: JsonSchema::object()
++          .prop("path", JsonSchema::string().required())
++          .prop("lines", JsonSchema::array_of(JsonSchema::integer()))
++          .prop("symbol", JsonSchema::string())
++          .prop("context", JsonSchema::integer())
++          .prop("max_bytes", JsonSchema::integer())
++          .finish(),
++    }
++}
+@@
+     tools.push(create_apply_patch_json_tool());
+     tools.push(create_exec_command_tool_for_responses_api().into());
++    tools.push(create_read_code_tool().into());
+     tools
+ }

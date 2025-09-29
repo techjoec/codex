@@ -1,0 +1,20 @@
+# context_policy.yaml — generated 2025-09-29
+defaults:
+  per_call:
+    max_lines: 160
+    max_bytes: 8192
+  per_turn:
+    max_bytes: 24576
+  rg_max_bytes: 8192
+  exec_output_max_bytes: 6144
+  build_log_tail_lines: 120
+  overlap_suppression: true
+  repeat_command_breaker:
+    repeats: 3
+    window_seconds: 120
+  allow_large_slice_if_small_file: true
+  large_slice_lines: 400
+  large_slice_bytes: 16384
+  relax_flag: "/relax"
+per_extension_caps:
+  # (none detected)

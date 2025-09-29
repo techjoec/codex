@@ -15,6 +15,7 @@ use tokio::io::AsyncReadExt;
 use tokio::io::BufReader;
 use tokio::process::Child;
 
+use crate::bash::parse_bash_lc_plain_commands;
 use crate::error::CodexErr;
 use crate::error::Result;
 use crate::error::SandboxErr;
@@ -40,6 +41,73 @@ const EXEC_TIMEOUT_EXIT_CODE: i32 = 124; // conventional timeout exit code
 // I/O buffer sizing
 const READ_CHUNK_SIZE: usize = 8192; // bytes per read
 const AGGREGATE_BUFFER_INITIAL_CAPACITY: usize = 8 * 1024; // 8 KiB
+
+const GENERIC_EXEC_OUTPUT_MAX_BYTES: usize = 6 * 1024; // 6 KiB budget for most commands
+const RG_EXEC_OUTPUT_MAX_BYTES: usize = 8 * 1024; // 8 KiB budget for ripgrep
+
+const GENERIC_EXEC_TRUNCATION_NOTICE: &str =
+    "[output truncated to 6 KiB; refine the command or request /relax for a temporary increase]";
+const RG_EXEC_TRUNCATION_NOTICE: &str =
+    "[rg output truncated to 8 KiB; narrow the search (e.g., add filters) or request /relax]";
+
+#[derive(Clone, Copy, Debug)]
+struct ExecOutputLimit {
+    stream_max_bytes: usize,
+    aggregated_max_bytes: usize,
+    truncation_notice: &'static str,
+}
+
+impl ExecOutputLimit {
+    const fn generic() -> Self {
+        Self {
+            stream_max_bytes: GENERIC_EXEC_OUTPUT_MAX_BYTES,
+            aggregated_max_bytes: GENERIC_EXEC_OUTPUT_MAX_BYTES,
+            truncation_notice: GENERIC_EXEC_TRUNCATION_NOTICE,
+        }
+    }
+
+    const fn ripgrep() -> Self {
+        Self {
+            stream_max_bytes: RG_EXEC_OUTPUT_MAX_BYTES,
+            aggregated_max_bytes: RG_EXEC_OUTPUT_MAX_BYTES,
+            truncation_notice: RG_EXEC_TRUNCATION_NOTICE,
+        }
+    }
+}
+
+fn exec_output_limit_for_command(command: &[String]) -> ExecOutputLimit {
+    if command_invokes_ripgrep(command) {
+        ExecOutputLimit::ripgrep()
+    } else {
+        ExecOutputLimit::generic()
+    }
+}
+
+fn command_invokes_ripgrep(command: &[String]) -> bool {
+    fn is_rg_program(program: &str) -> bool {
+        Path::new(program)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|name| name == "rg")
+            .unwrap_or(false)
+    }
+
+    if let Some(all_commands) = parse_bash_lc_plain_commands(command) {
+        if all_commands.len() != 1 {
+            return false;
+        }
+        all_commands
+            .first()
+            .and_then(|cmd| cmd.first())
+            .map(|program| is_rg_program(program))
+            .unwrap_or(false)
+    } else {
+        command
+            .first()
+            .map(|program| is_rg_program(program))
+            .unwrap_or(false)
+    }
+}
 
 /// Limit the number of ExecCommandOutputDelta events emitted per exec call.
 /// Aggregation still collects full output; only the live event stream is capped.
@@ -90,10 +158,13 @@ pub async fn process_exec_tool_call(
     let start = Instant::now();
 
     let timeout_duration = params.timeout_duration();
+    let output_limit = exec_output_limit_for_command(&params.command);
 
     let raw_output_result: std::result::Result<RawExecToolCallOutput, CodexErr> = match sandbox_type
     {
-        SandboxType::None => exec(params, sandbox_policy, stdout_stream.clone()).await,
+        SandboxType::None => {
+            exec(params, sandbox_policy, stdout_stream.clone(), output_limit).await
+        }
         SandboxType::MacosSeatbelt => {
             let ExecParams {
                 command,
@@ -110,7 +181,8 @@ pub async fn process_exec_tool_call(
                 env,
             )
             .await?;
-            consume_truncated_output(child, timeout_duration, stdout_stream.clone()).await
+            consume_truncated_output(child, timeout_duration, stdout_stream.clone(), output_limit)
+                .await
         }
         SandboxType::LinuxSeccomp => {
             let ExecParams {
@@ -134,7 +206,7 @@ pub async fn process_exec_tool_call(
             )
             .await?;
 
-            consume_truncated_output(child, timeout_duration, stdout_stream).await
+            consume_truncated_output(child, timeout_duration, stdout_stream, output_limit).await
         }
     };
     let duration = start.elapsed();
@@ -159,9 +231,18 @@ pub async fn process_exec_tool_call(
                 exit_code = EXEC_TIMEOUT_EXIT_CODE;
             }
 
-            let stdout = raw_output.stdout.from_utf8_lossy();
-            let stderr = raw_output.stderr.from_utf8_lossy();
-            let aggregated_output = raw_output.aggregated_output.from_utf8_lossy();
+            let mut stdout = raw_output.stdout.from_utf8_lossy();
+            let mut stderr = raw_output.stderr.from_utf8_lossy();
+            let mut aggregated_output = raw_output.aggregated_output.from_utf8_lossy();
+
+            if stdout.truncated_by_bytes || stderr.truncated_by_bytes {
+                aggregated_output.truncated_by_bytes = true;
+            }
+
+            append_truncation_notice(&mut stdout, output_limit.truncation_notice);
+            append_truncation_notice(&mut stderr, output_limit.truncation_notice);
+            append_truncation_notice(&mut aggregated_output, output_limit.truncation_notice);
+
             let exec_output = ExecToolCallOutput {
                 exit_code,
                 stdout,
@@ -216,6 +297,7 @@ fn is_likely_sandbox_denied(sandbox_type: SandboxType, exit_code: i32) -> bool {
 pub struct StreamOutput<T> {
     pub text: T,
     pub truncated_after_lines: Option<u32>,
+    pub truncated_by_bytes: bool,
 }
 #[derive(Debug)]
 struct RawExecToolCallOutput {
@@ -231,6 +313,7 @@ impl StreamOutput<String> {
         Self {
             text,
             truncated_after_lines: None,
+            truncated_by_bytes: false,
         }
     }
 }
@@ -240,6 +323,7 @@ impl StreamOutput<Vec<u8>> {
         StreamOutput {
             text: String::from_utf8_lossy(&self.text).to_string(),
             truncated_after_lines: self.truncated_after_lines,
+            truncated_by_bytes: self.truncated_by_bytes,
         }
     }
 }
@@ -263,6 +347,7 @@ async fn exec(
     params: ExecParams,
     sandbox_policy: &SandboxPolicy,
     stdout_stream: Option<StdoutStream>,
+    output_limit: ExecOutputLimit,
 ) -> Result<RawExecToolCallOutput> {
     let timeout = params.timeout_duration();
     let ExecParams {
@@ -286,7 +371,7 @@ async fn exec(
         env,
     )
     .await?;
-    consume_truncated_output(child, timeout, stdout_stream).await
+    consume_truncated_output(child, timeout, stdout_stream, output_limit).await
 }
 
 /// Consumes the output of a child process, truncating it so it is suitable for
@@ -295,6 +380,7 @@ async fn consume_truncated_output(
     mut child: Child,
     timeout: Duration,
     stdout_stream: Option<StdoutStream>,
+    output_limit: ExecOutputLimit,
 ) -> Result<RawExecToolCallOutput> {
     // Both stdout and stderr were configured with `Stdio::piped()`
     // above, therefore `take()` should normally return `Some`.  If it doesn't
@@ -318,12 +404,14 @@ async fn consume_truncated_output(
         stdout_stream.clone(),
         false,
         Some(agg_tx.clone()),
+        output_limit.stream_max_bytes,
     ));
     let stderr_handle = tokio::spawn(read_capped(
         BufReader::new(stderr_reader),
         stdout_stream.clone(),
         true,
         Some(agg_tx.clone()),
+        output_limit.stream_max_bytes,
     ));
 
     let (exit_status, timed_out) = tokio::select! {
@@ -352,13 +440,32 @@ async fn consume_truncated_output(
 
     drop(agg_tx);
 
-    let mut combined_buf = Vec::with_capacity(AGGREGATE_BUFFER_INITIAL_CAPACITY);
+    let mut combined_buf = Vec::with_capacity(
+        output_limit
+            .aggregated_max_bytes
+            .min(AGGREGATE_BUFFER_INITIAL_CAPACITY),
+    );
+    let mut aggregated_truncated = false;
     while let Ok(chunk) = agg_rx.recv().await {
-        append_all(&mut combined_buf, &chunk);
+        if combined_buf.len() < output_limit.aggregated_max_bytes {
+            let remaining = output_limit
+                .aggregated_max_bytes
+                .saturating_sub(combined_buf.len());
+            let take = remaining.min(chunk.len());
+            if take > 0 {
+                append_all(&mut combined_buf, &chunk[..take]);
+            }
+            if take < chunk.len() {
+                aggregated_truncated = true;
+            }
+        } else {
+            aggregated_truncated = true;
+        }
     }
     let aggregated_output = StreamOutput {
         text: combined_buf,
         truncated_after_lines: None,
+        truncated_by_bytes: aggregated_truncated,
     };
 
     Ok(RawExecToolCallOutput {
@@ -375,12 +482,12 @@ async fn read_capped<R: AsyncRead + Unpin + Send + 'static>(
     stream: Option<StdoutStream>,
     is_stderr: bool,
     aggregate_tx: Option<Sender<Vec<u8>>>,
+    max_bytes: usize,
 ) -> io::Result<StreamOutput<Vec<u8>>> {
     let mut buf = Vec::with_capacity(AGGREGATE_BUFFER_INITIAL_CAPACITY);
     let mut tmp = [0u8; READ_CHUNK_SIZE];
     let mut emitted_deltas: usize = 0;
-
-    // No caps: append all bytes
+    let mut truncated = false;
 
     loop {
         let n = reader.read(&mut tmp).await?;
@@ -414,14 +521,70 @@ async fn read_capped<R: AsyncRead + Unpin + Send + 'static>(
             let _ = tx.send(tmp[..n].to_vec()).await;
         }
 
-        append_all(&mut buf, &tmp[..n]);
+        if buf.len() < max_bytes {
+            let remaining = max_bytes.saturating_sub(buf.len());
+            let take = remaining.min(n);
+            if take > 0 {
+                append_all(&mut buf, &tmp[..take]);
+            }
+            if take < n {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
         // Continue reading to EOF to avoid back-pressure
     }
 
     Ok(StreamOutput {
         text: buf,
         truncated_after_lines: None,
+        truncated_by_bytes: truncated,
     })
+}
+
+fn append_truncation_notice(output: &mut StreamOutput<String>, notice: &str) {
+    if !output.truncated_by_bytes {
+        return;
+    }
+
+    if !output.text.is_empty() && !output.text.ends_with('\n') {
+        output.text.push('\n');
+    }
+    output.text.push_str(notice);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_ripgrep_plain_command() {
+        let command = vec!["rg".to_string(), "needle".to_string()];
+        let limits = exec_output_limit_for_command(&command);
+        assert_eq!(limits.aggregated_max_bytes, RG_EXEC_OUTPUT_MAX_BYTES);
+        assert_eq!(limits.stream_max_bytes, RG_EXEC_OUTPUT_MAX_BYTES);
+        assert_eq!(limits.truncation_notice, RG_EXEC_TRUNCATION_NOTICE);
+    }
+
+    #[test]
+    fn detects_ripgrep_via_bash() {
+        let command = vec![
+            "bash".to_string(),
+            "-lc".to_string(),
+            "rg --json term".to_string(),
+        ];
+        let limits = exec_output_limit_for_command(&command);
+        assert_eq!(limits.aggregated_max_bytes, RG_EXEC_OUTPUT_MAX_BYTES);
+    }
+
+    #[test]
+    fn defaults_to_generic_for_other_commands() {
+        let command = vec!["python".to_string(), "script.py".to_string()];
+        let limits = exec_output_limit_for_command(&command);
+        assert_eq!(limits.aggregated_max_bytes, GENERIC_EXEC_OUTPUT_MAX_BYTES);
+        assert_eq!(limits.truncation_notice, GENERIC_EXEC_TRUNCATION_NOTICE);
+    }
 }
 
 #[cfg(unix)]

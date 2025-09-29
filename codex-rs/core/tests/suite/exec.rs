@@ -57,6 +57,7 @@ async fn exit_code_0_succeeds() {
     assert_eq!(output.stdout.text, "hello\n");
     assert_eq!(output.stderr.text, "");
     assert_eq!(output.stdout.truncated_after_lines, None);
+    assert!(!output.stdout.truncated_by_bytes);
 }
 
 /// Command succeeds with exit code 0 normally
@@ -77,6 +78,7 @@ async fn truncates_output_lines() {
         .join("");
     assert_eq!(output.stdout.text, expected_output);
     assert_eq!(output.stdout.truncated_after_lines, None);
+    assert!(!output.stdout.truncated_by_bytes);
 }
 
 /// Command succeeds with exit code 0 normally
@@ -92,8 +94,22 @@ async fn truncates_output_bytes() {
 
     let output = run_test_cmd(tmp, cmd).await.unwrap();
 
-    assert!(output.stdout.text.len() >= 15000);
+    assert!(output.stdout.truncated_by_bytes);
     assert_eq!(output.stdout.truncated_after_lines, None);
+    assert!(
+        output.stdout.text.contains("output truncated to 6 KiB"),
+        "missing truncation notice: {}",
+        output.stdout.text
+    );
+    assert!(output.aggregated_output.truncated_by_bytes);
+    assert!(
+        output
+            .aggregated_output
+            .text
+            .contains("output truncated to 6 KiB"),
+        "missing aggregated truncation notice: {}",
+        output.aggregated_output.text
+    );
 }
 
 /// Command not found returns exit code 127, this is not considered a sandbox error

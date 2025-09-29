@@ -78,6 +78,7 @@ async fn test_exec_stdout_stream_events_echo() {
 
     assert_eq!(result.exit_code, 0);
     assert_eq!(result.stdout.text, "hello-world\n");
+    assert!(!result.stdout.truncated_by_bytes);
 
     let streamed = collect_stdout_events(rx);
     // We should have received at least the same contents (possibly in one chunk)
@@ -131,6 +132,7 @@ async fn test_exec_stderr_stream_events_echo() {
     assert_eq!(result.exit_code, 0);
     assert_eq!(result.stdout.text, "");
     assert_eq!(result.stderr.text, "oops\n");
+    assert!(!result.stderr.truncated_by_bytes);
 
     // Collect only stderr delta events
     let mut err = Vec::new();
@@ -184,6 +186,7 @@ async fn test_aggregated_output_interleaves_in_order() {
     assert_eq!(result.stderr.text, "E1\nE2\n");
     assert_eq!(result.aggregated_output.text, "O1\nE1\nO2\nE2\n");
     assert_eq!(result.aggregated_output.truncated_after_lines, None);
+    assert!(!result.aggregated_output.truncated_by_bytes);
 }
 
 #[tokio::test]
@@ -224,6 +227,9 @@ async fn test_exec_timeout_returns_partial_output() {
     assert_eq!(output.stdout.text, "before\n");
     assert!(output.stderr.text.is_empty());
     assert_eq!(output.aggregated_output.text, "before\n");
+    assert!(!output.stdout.truncated_by_bytes);
+    assert!(!output.stderr.truncated_by_bytes);
+    assert!(!output.aggregated_output.truncated_by_bytes);
     assert!(output.duration >= Duration::from_millis(200));
     assert!(output.timed_out);
 }

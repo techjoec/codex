@@ -12,24 +12,26 @@
 ## 3. Implementation Phases and Detailed Workstreams
 
 ### Phase 1 – Guardrails and Output Budgets (Immediate)
-1. **Tool-output caps**
-   - Enforce per-call limits of ≤160 lines or ≤8 KB, with per-turn budget of 24 KB; honor language-specific overrides (md/js/ts/rs/kt/tsx/yml up to 200 lines, py/log ≈181, json/txt ≈180) defined in the guidance. 【F:our-docs/CONVERSATION_NOTES.md†L54-L61】【F:our-docs/CONVERSATION_NOTES.md†L82-L85】【F:our-docs/policy/context_policy.yaml†L2-L20】
-   - Cap generic command output at 6 KB and `rg` responses at 8 KB, emitting compact JSON summaries rather than full matches.
-2. **Command gating**
-   - Remove `cat`/`nl` from the safe-command allow list and redirect large file access attempts to the new `read_code` tool with actionable messaging. 【F:our-docs/CONVERSATION_NOTES.md†L54-L61】【F:our-docs/patches/command_safety_patch.diff†L1-L5】
-   - Wrap build tooling (`gradle`, `npm`, `pnpm`, `yarn`, `cargo`, `mvn`) with tee-to-disk plus 120-line tail responders and a 10-line failure digest before surfacing output. 【F:our-docs/CONVERSATION_NOTES.md†L54-L61】【F:our-docs/policy/context_policy.yaml†L2-L12】
+1. **Tool-output caps** *(In progress)*
+   - ✅ `read_code` handler enforces ≤8 KB / language-specific line caps with a small-file exception. 【F:core/src/tool_read_code.rs†L1-L249】
+   - ✅ Exec tool output clamps 6 KB generic output and 8 KB `rg` runs with truncation notices to steer callers toward narrower commands. 【F:codex-rs/core/src/exec.rs†L26-L220】【F:codex-rs/core/src/exec.rs†L321-L438】
+   - ☐ Per-turn budgeting remains open.
+2. **Command gating** *(Partially complete)*
+   - ✅ Removed `cat`/`nl` from the safe list and reject full-file reads >4 KB with guidance to call `read_code`. 【F:core/src/command_safety/is_safe_command.rs†L17-L198】【F:core/src/codex.rs†L2550-L2874】
+   - ☐ Build tool tail wrappers remain to be implemented.
 3. **Repeat-command breaker**
    - Introduce a session-scoped counter (hash or count-min sketch) that aborts on ≥3 identical commands within 120 seconds when no new information is produced, nudging the agent toward narrower queries. 【F:our-docs/policy/context_policy.yaml†L11-L18】【F:our-docs/CONVERSATION_NOTES.md†L82-L86】
 4. **Telemetry hooks**
    - Record per-turn metrics for bytes served, lines trimmed, commands blocked, and log-tail invocations to support A/B testing of guardrail efficacy. 【F:our-docs/CONVERSATION_NOTES.md†L76-L79】
 
 ### Phase 2 – `read_code` Tool and Overlap Suppression (High Leverage)
-1. **Tool registration**
-   - Add a strict JSON `read_code` tool in `openai_tools.rs`, exposing parameters for `path`, line ranges, optional symbol targeting, and maximum byte envelope. 【F:our-docs/patches/openai_tools_read_code.diff†L1-L17】【F:our-docs/CONVERSATION_NOTES.md†L62-L65】
-2. **Range-serving engine**
-   - Implement a session-local interval set keyed by `(path, git_oid)` to track served slices, subtract overlaps on each request, and short-circuit with reference-only responses when the requested region is already in history. 【F:our-docs/CONVERSATION_NOTES.md†L62-L65】【F:our-docs/CONVERSATION_NOTES.md†L89-L95】
-3. **Policy enforcement**
-   - Enforce per-call and per-turn budgets within the handler, honoring the large-slice exception for small files and `/relax` toggles. 【F:our-docs/policy/context_policy.yaml†L2-L20】
+1. **Tool registration** *(Done)*
+   - ✅ Added a strict JSON `read_code` tool and updated prompt-caching expectations. 【F:core/src/openai_tools.rs†L240-L548】【F:core/tests/suite/prompt_caching.rs†L210-L235】
+2. **Range-serving engine** *(Pending follow-up)*
+   - ☐ Current handler reads ranges with byte/line budgeting but does not yet track `(path, git_oid)` intervals.
+3. **Policy enforcement** *(Partially complete)*
+   - ✅ Enforce per-call byte/line limits plus small-file exception. 【F:core/src/tool_read_code.rs†L1-L249】
+   - ☐ Per-turn budget accounting and `/relax` toggle integration remain open.
 4. **History compaction**
    - Update the transcript compactor to retroactively replace raw byte dumps with `{path,[a,b],oid,chunk_ids}` references so cached prefixes stabilize across turns. 【F:our-docs/CONVERSATION_NOTES.md†L89-L95】
 

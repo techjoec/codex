@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
+use std::time::Instant;
 
 use crate::AuthManager;
 use crate::client_common::REVIEW_PROMPT;
@@ -116,6 +117,7 @@ use crate::safety::assess_command_safety;
 use crate::safety::assess_safety_for_untrusted_command;
 use crate::shell;
 use crate::state::ActiveTurn;
+use crate::state::RepeatCommandBlock;
 use crate::state::SessionServices;
 use crate::tasks::CompactTask;
 use crate::tasks::RegularTask;
@@ -948,6 +950,9 @@ impl Session {
         )
         .await;
 
+        self.record_repeat_command_result(&begin_ctx.command_for_display, borrowed)
+            .await;
+
         result
     }
 
@@ -972,6 +977,29 @@ impl Session {
             }),
         };
         self.send_event(event).await;
+    }
+
+    async fn should_block_repeated_command(
+        &self,
+        command: &[String],
+    ) -> Option<RepeatCommandBlock> {
+        if command.is_empty() {
+            return None;
+        }
+
+        let now = Instant::now();
+        let mut state = self.state.lock().await;
+        state.check_repeat_command(command, now)
+    }
+
+    async fn record_repeat_command_result(&self, command: &[String], output: &ExecToolCallOutput) {
+        if command.is_empty() {
+            return;
+        }
+
+        let aggregated = output.aggregated_output.text.clone();
+        let mut state = self.state.lock().await;
+        state.record_repeat_command(command, &aggregated, Instant::now());
     }
 
     /// Build the full turn input by concatenating the current conversation
@@ -2647,6 +2675,31 @@ async fn handle_container_exec_with_params(
             (params, safety, command_for_display)
         }
     };
+
+    if apply_patch_exec.is_none() {
+        if let Some(block) = sess
+            .should_block_repeated_command(&command_for_display)
+            .await
+        {
+            let command_str = if command_for_display.is_empty() {
+                "<empty command>".to_string()
+            } else {
+                command_for_display.join(" ")
+            };
+            let repeat_count = block.repeat_count;
+            let plural = if repeat_count == 1 { "" } else { "s" };
+            let mut message = format!(
+                "repeat-command breaker: `{command_str}` already ran {repeat_count} time{plural} in the last {} seconds without producing new output; refine the command (e.g., narrow its scope) or request /relax to override.",
+                block.window.as_secs()
+            );
+            if let Some(excerpt) = block.last_excerpt.as_deref() {
+                let indented = excerpt.replace('\n', "\n  ");
+                message.push_str(&format!("\nLast output sample:\n  {indented}"));
+            }
+            sess.notify_background_event(&sub_id, message.clone()).await;
+            return Err(FunctionCallError::RespondToModel(message));
+        }
+    }
 
     let sandbox_type = match safety {
         SafetyCheck::AutoApprove { sandbox_type } => sandbox_type,

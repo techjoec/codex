@@ -26,6 +26,7 @@ pub(crate) struct SessionState {
     pub(crate) token_info: Option<TokenUsageInfo>,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     repeat_command_breaker: RepeatCommandBreaker,
+    code_read_index: HashMap<String, IntervalSet>,
 }
 
 impl SessionState {
@@ -100,6 +101,57 @@ impl SessionState {
     }
 
     // Pending input/approval moved to TurnState.
+
+    pub(crate) fn compute_unserved_code_ranges(
+        &self,
+        path: &str,
+        ranges: &[(usize, usize)],
+    ) -> (Vec<(usize, usize)>, bool) {
+        let Some(intervals) = self.code_read_index.get(path) else {
+            return (ranges.to_vec(), false);
+        };
+
+        let mut uncovered = Vec::new();
+        let mut had_overlap = false;
+
+        for &(start, end) in ranges {
+            if start == 0 || end == 0 || start > end {
+                continue;
+            }
+            let missing = intervals.subtract(start, end);
+            if !missing.is_empty() {
+                uncovered.extend(missing.iter().copied());
+            }
+            let requested_len = end.saturating_sub(start).saturating_add(1);
+            let uncovered_len = missing
+                .iter()
+                .map(|(s, e)| e.saturating_sub(*s).saturating_add(1))
+                .sum::<usize>();
+            if uncovered_len < requested_len {
+                had_overlap = true;
+            }
+        }
+
+        if uncovered.is_empty() {
+            (Vec::new(), had_overlap)
+        } else {
+            (uncovered, had_overlap)
+        }
+    }
+
+    pub(crate) fn record_served_code_ranges(&mut self, path: &str, ranges: &[(usize, usize)]) {
+        if ranges.is_empty() {
+            return;
+        }
+        let entry = self
+            .code_read_index
+            .entry(path.to_string())
+            .or_insert_with(IntervalSet::default);
+
+        for &(start, end) in ranges {
+            entry.insert(start, end);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -113,6 +165,90 @@ pub(crate) struct RepeatCommandBlock {
 struct RepeatCommandBreaker {
     entries: HashMap<Vec<String>, RepeatCommandEntry>,
     config: RepeatCommandConfig,
+}
+
+#[derive(Debug, Default)]
+struct IntervalSet {
+    intervals: Vec<(usize, usize)>,
+}
+
+impl IntervalSet {
+    fn subtract(&self, start: usize, end: usize) -> Vec<(usize, usize)> {
+        if start == 0 || end == 0 || start > end {
+            return Vec::new();
+        }
+
+        if self.intervals.is_empty() {
+            return vec![(start, end)];
+        }
+
+        let mut uncovered = Vec::new();
+        let mut cursor = start;
+
+        for &(lo, hi) in &self.intervals {
+            if hi < cursor {
+                continue;
+            }
+            if lo > end {
+                break;
+            }
+            if lo > cursor {
+                let gap_end = (lo - 1).min(end);
+                if cursor <= gap_end {
+                    uncovered.push((cursor, gap_end));
+                }
+            }
+            if hi >= cursor {
+                cursor = hi.saturating_add(1);
+                if cursor > end {
+                    return uncovered;
+                }
+            }
+        }
+
+        if cursor <= end {
+            uncovered.push((cursor, end));
+        }
+
+        uncovered
+    }
+
+    fn insert(&mut self, start: usize, end: usize) {
+        if start == 0 || end == 0 || start > end {
+            return;
+        }
+
+        let mut merged = Vec::with_capacity(self.intervals.len() + 1);
+        let mut new_start = start;
+        let mut new_end = end;
+        let mut inserted = false;
+
+        for &(lo, hi) in &self.intervals {
+            if hi.saturating_add(1) < new_start {
+                merged.push((lo, hi));
+                continue;
+            }
+
+            if lo > new_end.saturating_add(1) {
+                if !inserted {
+                    merged.push((new_start, new_end));
+                    inserted = true;
+                }
+                merged.push((lo, hi));
+                continue;
+            }
+
+            new_start = new_start.min(lo);
+            new_end = new_end.max(hi);
+        }
+
+        if !inserted {
+            merged.push((new_start, new_end));
+        }
+
+        merged.sort_by_key(|(lo, _)| *lo);
+        self.intervals = merged;
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -232,6 +368,28 @@ mod tests {
 
     fn command(cmd: &[&str]) -> Vec<String> {
         cmd.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn interval_set_records_and_subtracts() {
+        let mut set = IntervalSet::default();
+        assert_eq!(set.subtract(5, 10), vec![(5, 10)]);
+        set.insert(5, 10);
+        assert!(set.subtract(5, 10).is_empty());
+        assert_eq!(set.subtract(8, 15), vec![(11, 15)]);
+    }
+
+    #[test]
+    fn session_state_tracks_code_ranges() {
+        let mut state = SessionState::new();
+        let (unserved, overlap) = state.compute_unserved_code_ranges("file.rs", &[(1, 5)]);
+        assert_eq!(unserved, vec![(1, 5)]);
+        assert!(!overlap);
+
+        state.record_served_code_ranges("file.rs", &[(1, 3)]);
+        let (unserved, overlap) = state.compute_unserved_code_ranges("file.rs", &[(1, 5)]);
+        assert_eq!(unserved, vec![(4, 5)]);
+        assert!(overlap);
     }
 
     #[test]

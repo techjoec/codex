@@ -36,14 +36,12 @@ fn is_safe_to_call_with_exec(command: &[String]) -> bool {
     match cmd0 {
         #[rustfmt::skip]
         Some(
-            "cat" |
             "cd" |
             "echo" |
             "false" |
             "grep" |
             "head" |
             "ls" |
-            "nl" |
             "pwd" |
             "tail" |
             "true" |
@@ -175,11 +173,6 @@ mod tests {
         assert!(is_safe_to_call_with_exec(&vec_str(&[
             "sed", "-n", "1,5p", "file.txt"
         ])));
-        assert!(is_safe_to_call_with_exec(&vec_str(&[
-            "nl",
-            "-nrz",
-            "Cargo.toml"
-        ])));
 
         // Safe `find` command (no unsafe options).
         assert!(is_safe_to_call_with_exec(&vec_str(&[
@@ -214,6 +207,9 @@ mod tests {
                 "expected {args:?} to be unsafe"
             );
         }
+
+        assert!(!is_safe_to_call_with_exec(&vec_str(&["cat", "Cargo.toml"])));
+        assert!(!is_safe_to_call_with_exec(&vec_str(&["nl", "Cargo.toml"])));
     }
 
     #[test]

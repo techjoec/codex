@@ -125,6 +125,7 @@ use crate::state::{
 use crate::tasks::CompactTask;
 use crate::tasks::RegularTask;
 use crate::tasks::ReviewTask;
+use crate::tool_read_code::handle_read_code_tool_call;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use crate::unified_exec::UnifiedExecSessionManager;
 use crate::user_instructions::UserInstructions;
@@ -291,7 +292,7 @@ pub(crate) struct TurnContext {
 }
 
 impl TurnContext {
-    fn resolve_path(&self, path: Option<String>) -> PathBuf {
+    pub(crate) fn resolve_path(&self, path: Option<String>) -> PathBuf {
         path.as_ref()
             .map(PathBuf::from)
             .map_or_else(|| self.cwd.clone(), |p| self.cwd.join(p))
@@ -555,7 +556,7 @@ impl Session {
         active.as_ref().map(|at| Arc::clone(&at.turn_state))
     }
 
-    async fn reserve_tool_output_budget(
+    pub(crate) async fn reserve_tool_output_budget(
         &self,
         desired_bytes: usize,
         notice_len: usize,
@@ -563,6 +564,20 @@ impl Session {
         let turn_state = self.current_turn_state().await?;
         let mut guard = turn_state.lock().await;
         Some(guard.reserve_tool_output(desired_bytes, notice_len))
+    }
+
+    pub(crate) async fn compute_unserved_code_ranges(
+        &self,
+        path: &str,
+        ranges: &[(usize, usize)],
+    ) -> (Vec<(usize, usize)>, bool) {
+        let state = self.state.lock().await;
+        state.compute_unserved_code_ranges(path, ranges)
+    }
+
+    pub(crate) async fn record_served_code_ranges(&self, path: &str, ranges: &[(usize, usize)]) {
+        let mut state = self.state.lock().await;
+        state.record_served_code_ranges(path, ranges);
     }
 
     async fn apply_turn_output_budget(&self, output: &mut ExecToolCallOutput) {
@@ -2579,6 +2594,7 @@ async fn handle_function_call(
             )
             .await
         }
+        "read_code" => handle_read_code_tool_call(sess, turn_context, arguments).await,
         "update_plan" => handle_update_plan(sess, arguments, sub_id, call_id).await,
         EXEC_COMMAND_TOOL_NAME => {
             // TODO(mbolin): Sandbox check.

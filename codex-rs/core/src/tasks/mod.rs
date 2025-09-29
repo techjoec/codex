@@ -104,13 +104,30 @@ impl Session {
         sub_id: String,
         last_agent_message: Option<String>,
     ) {
-        let mut active = self.active_turn.lock().await;
-        if let Some(at) = active.as_mut()
-            && at.remove_task(&sub_id)
-        {
-            *active = None;
+        let (turn_state, removed_last_task) = {
+            let mut active = self.active_turn.lock().await;
+            let turn_state = active.as_ref().map(|at| Arc::clone(&at.turn_state));
+            let removed_last_task = if let Some(at) = active.as_mut() {
+                at.remove_task(&sub_id)
+            } else {
+                false
+            };
+            if removed_last_task {
+                *active = None;
+            }
+            (turn_state, removed_last_task)
+        };
+
+        if removed_last_task {
+            if let Some(turn_state) = turn_state {
+                let metrics = {
+                    let mut guard = turn_state.lock().await;
+                    guard.drain_metrics()
+                };
+                self.log_turn_metrics(&sub_id, metrics).await;
+            }
         }
-        drop(active);
+
         let event = Event {
             id: sub_id,
             msg: EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }),

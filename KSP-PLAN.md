@@ -15,14 +15,14 @@
 1. **Tool-output caps** *(In progress)*
    - ✅ `read_code` handler enforces ≤8 KB / language-specific line caps with a small-file exception. 【F:core/src/tool_read_code.rs†L1-L249】
    - ✅ Exec tool output clamps 6 KB generic output and 8 KB `rg` runs with truncation notices to steer callers toward narrower commands. 【F:codex-rs/core/src/exec.rs†L26-L220】【F:codex-rs/core/src/exec.rs†L321-L438】
-   - ☐ Per-turn budgeting remains open.
+   - ✅ Per-turn budgeting trims aggregated exec output against a 24 KB per-turn budget and appends concise notices once exhausted. 【F:codex-rs/core/src/state/turn.rs†L1-L218】【F:codex-rs/core/src/codex.rs†L940-L1050】
 2. **Command gating** *(Partially complete)*
    - ✅ Removed `cat`/`nl` from the safe list and reject full-file reads >4 KB with guidance to call `read_code`. 【F:core/src/command_safety/is_safe_command.rs†L17-L198】【F:core/src/codex.rs†L2550-L2874】
-   - ☐ Build tool tail wrappers remain to be implemented.
+   - ✅ Build tool tail wrappers tee build/test commands, serve the final 120 lines, and record tail metrics. 【F:codex-rs/core/src/exec.rs†L45-L218】【F:codex-rs/core/src/codex.rs†L604-L639】【F:codex-rs/core/src/state/turn.rs†L87-L105】
 3. **Repeat-command breaker**
    - ✅ Session-scoped breaker tracks hashed output per command and blocks the third identical run within 120 seconds, emitting background guidance with the latest output preview to encourage narrower follow-ups. 【F:codex-rs/core/src/state/session.rs†L1-L214】【F:codex-rs/core/src/codex.rs†L900-L1016】【F:codex-rs/core/src/codex.rs†L2607-L2651】
 4. **Telemetry hooks**
-   - Record per-turn metrics for bytes served, lines trimmed, commands blocked, and log-tail invocations to support A/B testing of guardrail efficacy. 【F:our-docs/CONVERSATION_NOTES.md†L76-L79】
+   - ✅ Session completion now logs per-turn metrics covering bytes served, bytes trimmed, truncated outputs, blocked commands, and log-tail placeholders for A/B analysis. 【F:codex-rs/core/src/state/turn.rs†L154-L222】【F:codex-rs/core/src/tasks/mod.rs†L20-L120】【F:codex-rs/core/src/codex.rs†L520-L620】
 
 ### Phase 2 – `read_code` Tool and Overlap Suppression (High Leverage)
 1. **Tool registration** *(Done)*

@@ -44,17 +44,28 @@ const AGGREGATE_BUFFER_INITIAL_CAPACITY: usize = 8 * 1024; // 8 KiB
 
 const GENERIC_EXEC_OUTPUT_MAX_BYTES: usize = 6 * 1024; // 6 KiB budget for most commands
 const RG_EXEC_OUTPUT_MAX_BYTES: usize = 8 * 1024; // 8 KiB budget for ripgrep
+const BUILD_LOG_TAIL_MAX_BYTES: usize = 16 * 1024; // retain up to 16 KiB before tailing lines
+
+pub(crate) const BUILD_LOG_TAIL_LINES: usize = 120;
+pub(crate) const BUILD_LOG_TAIL_NOTICE: &str = "[build log trimmed to last 120 lines; refine the command or request /relax to inspect the full log]";
 
 const GENERIC_EXEC_TRUNCATION_NOTICE: &str =
     "[output truncated to 6 KiB; refine the command or request /relax for a temporary increase]";
 const RG_EXEC_TRUNCATION_NOTICE: &str =
     "[rg output truncated to 8 KiB; narrow the search (e.g., add filters) or request /relax]";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AggregatedOutputMode {
+    Head,
+    Tail,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ExecOutputLimit {
     stream_max_bytes: usize,
     aggregated_max_bytes: usize,
     truncation_notice: &'static str,
+    aggregated_mode: AggregatedOutputMode,
 }
 
 impl ExecOutputLimit {
@@ -63,6 +74,7 @@ impl ExecOutputLimit {
             stream_max_bytes: GENERIC_EXEC_OUTPUT_MAX_BYTES,
             aggregated_max_bytes: GENERIC_EXEC_OUTPUT_MAX_BYTES,
             truncation_notice: GENERIC_EXEC_TRUNCATION_NOTICE,
+            aggregated_mode: AggregatedOutputMode::Head,
         }
     }
 
@@ -71,6 +83,16 @@ impl ExecOutputLimit {
             stream_max_bytes: RG_EXEC_OUTPUT_MAX_BYTES,
             aggregated_max_bytes: RG_EXEC_OUTPUT_MAX_BYTES,
             truncation_notice: RG_EXEC_TRUNCATION_NOTICE,
+            aggregated_mode: AggregatedOutputMode::Head,
+        }
+    }
+
+    const fn build() -> Self {
+        Self {
+            stream_max_bytes: GENERIC_EXEC_OUTPUT_MAX_BYTES,
+            aggregated_max_bytes: BUILD_LOG_TAIL_MAX_BYTES,
+            truncation_notice: GENERIC_EXEC_TRUNCATION_NOTICE,
+            aggregated_mode: AggregatedOutputMode::Tail,
         }
     }
 }
@@ -78,6 +100,8 @@ impl ExecOutputLimit {
 fn exec_output_limit_for_command(command: &[String]) -> ExecOutputLimit {
     if command_invokes_ripgrep(command) {
         ExecOutputLimit::ripgrep()
+    } else if should_tail_build_output(command) {
+        ExecOutputLimit::build()
     } else {
         ExecOutputLimit::generic()
     }
@@ -107,6 +131,160 @@ fn command_invokes_ripgrep(command: &[String]) -> bool {
             .map(|program| is_rg_program(program))
             .unwrap_or(false)
     }
+}
+
+pub(crate) fn should_tail_build_output(command: &[String]) -> bool {
+    if let Some(all_commands) = parse_bash_lc_plain_commands(command) {
+        if all_commands.len() != 1 {
+            return false;
+        }
+        all_commands
+            .first()
+            .is_some_and(|cmd| command_is_build_tool(cmd))
+    } else {
+        command_is_build_tool(command)
+    }
+}
+
+fn command_is_build_tool(command: &[String]) -> bool {
+    let program = match command.first() {
+        Some(p) => p,
+        None => return false,
+    };
+    let name = match canonical_tool_name(program) {
+        Some(name) => name,
+        None => return false,
+    };
+
+    match name.as_str() {
+        "npm" => is_npm_build_command(command),
+        "pnpm" => is_pnpm_build_command(command),
+        "yarn" | "yarnpkg" => is_yarn_build_command(command),
+        "cargo" => is_cargo_build_command(command),
+        "gradle" | "gradlew" => true,
+        "mvn" | "mvnw" => true,
+        _ => false,
+    }
+}
+
+fn canonical_tool_name(program: &str) -> Option<String> {
+    let raw = Path::new(program)
+        .file_name()?
+        .to_str()?
+        .to_ascii_lowercase();
+    let trimmed = raw
+        .trim_end_matches(".exe")
+        .trim_end_matches(".cmd")
+        .trim_end_matches(".bat");
+    Some(trimmed.to_string())
+}
+
+fn is_buildish_script(script: &str) -> bool {
+    let trimmed = script.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.contains("build") || lower.contains("compile") || lower.contains("test")
+}
+
+fn is_npm_build_command(command: &[String]) -> bool {
+    let mut i = 1;
+    while i < command.len() {
+        let arg = command[i].as_str();
+        match arg {
+            "run" | "run-script" => {
+                return command
+                    .get(i + 1)
+                    .map_or(false, |script| is_buildish_script(script));
+            }
+            "test" | "build" => return true,
+            _ if arg.starts_with('-') => {
+                if let Some(next) = command.get(i + 1) {
+                    if !next.starts_with('-') {
+                        i += 1;
+                    }
+                }
+            }
+            _ => break,
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_pnpm_build_command(command: &[String]) -> bool {
+    let mut i = 1;
+    while i < command.len() {
+        let arg = command[i].as_str();
+        match arg {
+            "run" | "run-script" => {
+                return command
+                    .get(i + 1)
+                    .map_or(false, |script| is_buildish_script(script));
+            }
+            _ if is_buildish_script(arg) => return true,
+            _ if arg.starts_with('-') => {
+                if let Some(next) = command.get(i + 1) {
+                    if !next.starts_with('-') {
+                        i += 1;
+                    }
+                }
+            }
+            _ => break,
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_yarn_build_command(command: &[String]) -> bool {
+    let mut i = 1;
+    while i < command.len() {
+        let arg = command[i].as_str();
+        match arg {
+            "run" | "run-script" => {
+                return command
+                    .get(i + 1)
+                    .map_or(false, |script| is_buildish_script(script));
+            }
+            "workspace" => {
+                // Skip workspace name and continue scanning for a run command or script.
+                if i + 1 < command.len() {
+                    i += 1;
+                }
+            }
+            "workspaces" => {
+                if command.get(i + 1).map(|s| s.as_str()) == Some("run") {
+                    return command
+                        .get(i + 2)
+                        .map_or(false, |script| is_buildish_script(script));
+                }
+            }
+            _ if is_buildish_script(arg) => return true,
+            _ if arg.starts_with('-') => {
+                if let Some(next) = command.get(i + 1) {
+                    if !next.starts_with('-') {
+                        i += 1;
+                    }
+                }
+            }
+            _ => break,
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_cargo_build_command(command: &[String]) -> bool {
+    let Some(subcommand) = command.get(1).map(String::as_str) else {
+        return false;
+    };
+
+    matches!(
+        subcommand,
+        "build" | "check" | "test" | "clippy" | "doc" | "bench"
+    )
 }
 
 /// Limit the number of ExecCommandOutputDelta events emitted per exec call.
@@ -159,6 +337,7 @@ pub async fn process_exec_tool_call(
 
     let timeout_duration = params.timeout_duration();
     let output_limit = exec_output_limit_for_command(&params.command);
+    let aggregated_mode = output_limit.aggregated_mode;
 
     let raw_output_result: std::result::Result<RawExecToolCallOutput, CodexErr> = match sandbox_type
     {
@@ -241,7 +420,9 @@ pub async fn process_exec_tool_call(
 
             append_truncation_notice(&mut stdout, output_limit.truncation_notice);
             append_truncation_notice(&mut stderr, output_limit.truncation_notice);
-            append_truncation_notice(&mut aggregated_output, output_limit.truncation_notice);
+            if matches!(aggregated_mode, AggregatedOutputMode::Head) {
+                append_truncation_notice(&mut aggregated_output, output_limit.truncation_notice);
+            }
 
             let exec_output = ExecToolCallOutput {
                 exit_code,
@@ -447,19 +628,40 @@ async fn consume_truncated_output(
     );
     let mut aggregated_truncated = false;
     while let Ok(chunk) = agg_rx.recv().await {
-        if combined_buf.len() < output_limit.aggregated_max_bytes {
-            let remaining = output_limit
-                .aggregated_max_bytes
-                .saturating_sub(combined_buf.len());
-            let take = remaining.min(chunk.len());
-            if take > 0 {
-                append_all(&mut combined_buf, &chunk[..take]);
+        match output_limit.aggregated_mode {
+            AggregatedOutputMode::Head => {
+                if combined_buf.len() < output_limit.aggregated_max_bytes {
+                    let remaining = output_limit
+                        .aggregated_max_bytes
+                        .saturating_sub(combined_buf.len());
+                    let take = remaining.min(chunk.len());
+                    if take > 0 {
+                        append_all(&mut combined_buf, &chunk[..take]);
+                    }
+                    if take < chunk.len() {
+                        aggregated_truncated = true;
+                    }
+                } else {
+                    aggregated_truncated = true;
+                }
             }
-            if take < chunk.len() {
-                aggregated_truncated = true;
+            AggregatedOutputMode::Tail => {
+                if chunk.len() >= output_limit.aggregated_max_bytes {
+                    combined_buf.clear();
+                    let start = chunk.len() - output_limit.aggregated_max_bytes;
+                    append_all(&mut combined_buf, &chunk[start..]);
+                    aggregated_truncated = true;
+                    continue;
+                }
+
+                let total = combined_buf.len() + chunk.len();
+                if total > output_limit.aggregated_max_bytes {
+                    let overflow = total - output_limit.aggregated_max_bytes;
+                    combined_buf.drain(..overflow);
+                    aggregated_truncated = true;
+                }
+                append_all(&mut combined_buf, &chunk);
             }
-        } else {
-            aggregated_truncated = true;
         }
     }
     let aggregated_output = StreamOutput {
@@ -584,6 +786,42 @@ mod tests {
         let limits = exec_output_limit_for_command(&command);
         assert_eq!(limits.aggregated_max_bytes, GENERIC_EXEC_OUTPUT_MAX_BYTES);
         assert_eq!(limits.truncation_notice, GENERIC_EXEC_TRUNCATION_NOTICE);
+    }
+
+    #[test]
+    fn detects_pnpm_build_scripts() {
+        let command = vec!["pnpm".to_string(), "run".to_string(), "build".to_string()];
+        assert!(should_tail_build_output(&command));
+        let limits = exec_output_limit_for_command(&command);
+        assert_eq!(limits.aggregated_max_bytes, BUILD_LOG_TAIL_MAX_BYTES);
+    }
+
+    #[test]
+    fn detects_yarn_workspace_run() {
+        let command = vec![
+            "yarn".to_string(),
+            "workspace".to_string(),
+            "web".to_string(),
+            "run".to_string(),
+            "test".to_string(),
+        ];
+        assert!(should_tail_build_output(&command));
+    }
+
+    #[test]
+    fn ignores_non_build_scripts() {
+        let command = vec!["npm".to_string(), "run".to_string(), "lint".to_string()];
+        assert!(!should_tail_build_output(&command));
+    }
+
+    #[test]
+    fn detects_build_inside_bash_invocation() {
+        let command = vec![
+            "bash".to_string(),
+            "-lc".to_string(),
+            "npm run build".to_string(),
+        ];
+        assert!(should_tail_build_output(&command));
     }
 }
 

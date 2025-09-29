@@ -62,7 +62,9 @@ use crate::exec::ExecToolCallOutput;
 use crate::exec::SandboxType;
 use crate::exec::StdoutStream;
 use crate::exec::StreamOutput;
-use crate::exec::process_exec_tool_call;
+use crate::exec::{
+    BUILD_LOG_TAIL_LINES, BUILD_LOG_TAIL_NOTICE, process_exec_tool_call, should_tail_build_output,
+};
 use crate::exec_command::EXEC_COMMAND_TOOL_NAME;
 use crate::exec_command::ExecCommandParams;
 use crate::exec_command::ExecSessionManager;
@@ -116,9 +118,10 @@ use crate::safety::SafetyCheck;
 use crate::safety::assess_command_safety;
 use crate::safety::assess_safety_for_untrusted_command;
 use crate::shell;
-use crate::state::ActiveTurn;
-use crate::state::RepeatCommandBlock;
-use crate::state::SessionServices;
+use crate::state::{
+    ActiveTurn, RepeatCommandBlock, SessionServices, TURN_OUTPUT_TRUNCATION_NOTICE,
+    ToolBudgetDecision, TurnMetrics, TurnState,
+};
 use crate::tasks::CompactTask;
 use crate::tasks::RegularTask;
 use crate::tasks::ReviewTask;
@@ -547,6 +550,110 @@ impl Session {
         }
     }
 
+    async fn current_turn_state(&self) -> Option<Arc<Mutex<TurnState>>> {
+        let active = self.active_turn.lock().await;
+        active.as_ref().map(|at| Arc::clone(&at.turn_state))
+    }
+
+    async fn reserve_tool_output_budget(
+        &self,
+        desired_bytes: usize,
+        notice_len: usize,
+    ) -> Option<ToolBudgetDecision> {
+        let turn_state = self.current_turn_state().await?;
+        let mut guard = turn_state.lock().await;
+        Some(guard.reserve_tool_output(desired_bytes, notice_len))
+    }
+
+    async fn apply_turn_output_budget(&self, output: &mut ExecToolCallOutput) {
+        let desired_bytes = output.aggregated_output.text.len();
+        if desired_bytes == 0 {
+            return;
+        }
+
+        let notice_len = TURN_OUTPUT_TRUNCATION_NOTICE.len();
+        let Some(decision) = self
+            .reserve_tool_output_budget(desired_bytes, notice_len)
+            .await
+        else {
+            return;
+        };
+
+        if !decision.truncated {
+            return;
+        }
+
+        truncate_string_to_bytes(
+            &mut output.aggregated_output.text,
+            decision.allowed_content_bytes,
+        );
+
+        let notice = truncated_notice(TURN_OUTPUT_TRUNCATION_NOTICE, decision.notice_bytes);
+        if !notice.is_empty() {
+            if !output.aggregated_output.text.is_empty()
+                && !output.aggregated_output.text.ends_with('\n')
+            {
+                output.aggregated_output.text.push('\n');
+            }
+            output.aggregated_output.text.push_str(&notice);
+        }
+
+        output.aggregated_output.truncated_by_bytes = true;
+    }
+
+    async fn apply_build_log_tail(&self, command: &[String], output: &mut ExecToolCallOutput) {
+        if !should_tail_build_output(command) {
+            return;
+        }
+
+        if !tail_string_to_last_lines(&mut output.aggregated_output.text, BUILD_LOG_TAIL_LINES) {
+            return;
+        }
+
+        if !output.aggregated_output.text.is_empty()
+            && !output.aggregated_output.text.ends_with('\n')
+        {
+            output.aggregated_output.text.push('\n');
+        }
+        output
+            .aggregated_output
+            .text
+            .push_str(BUILD_LOG_TAIL_NOTICE);
+        output.aggregated_output.truncated_after_lines = Some(BUILD_LOG_TAIL_LINES as u32);
+        output.aggregated_output.truncated_by_bytes = true;
+        self.record_turn_log_tail().await;
+    }
+
+    async fn record_turn_command_blocked(&self) {
+        if let Some(turn_state) = self.current_turn_state().await {
+            let mut guard = turn_state.lock().await;
+            guard.record_command_blocked();
+        }
+    }
+
+    async fn record_turn_log_tail(&self) {
+        if let Some(turn_state) = self.current_turn_state().await {
+            let mut guard = turn_state.lock().await;
+            guard.record_log_tail();
+        }
+    }
+
+    pub(crate) async fn log_turn_metrics(&self, turn_id: &str, metrics: TurnMetrics) {
+        if metrics.is_empty() {
+            return;
+        }
+
+        info!(
+            turn_id = turn_id,
+            bytes_served = metrics.bytes_served,
+            bytes_trimmed = metrics.bytes_trimmed,
+            outputs_truncated = metrics.outputs_truncated,
+            commands_blocked = metrics.commands_blocked,
+            log_tail_invocations = metrics.log_tail_invocations,
+            "turn_metrics"
+        );
+    }
+
     pub async fn request_command_approval(
         &self,
         sub_id: String,
@@ -915,7 +1022,7 @@ impl Session {
         self.on_exec_command_begin(turn_diff_tracker, begin_ctx.clone())
             .await;
 
-        let result = process_exec_tool_call(
+        let mut result = process_exec_tool_call(
             exec_args.params,
             exec_args.sandbox_type,
             exec_args.sandbox_policy,
@@ -924,6 +1031,28 @@ impl Session {
             exec_args.stdout_stream,
         )
         .await;
+
+        match &mut result {
+            Ok(output) => {
+                self.apply_build_log_tail(&begin_ctx.command_for_display, output)
+                    .await;
+            }
+            Err(CodexErr::Sandbox(SandboxErr::Timeout { output })) => {
+                self.apply_build_log_tail(&begin_ctx.command_for_display, output)
+                    .await;
+            }
+            _ => {}
+        }
+
+        match &mut result {
+            Ok(output) => {
+                self.apply_turn_output_budget(output).await;
+            }
+            Err(CodexErr::Sandbox(SandboxErr::Timeout { output })) => {
+                self.apply_turn_output_budget(output).await;
+            }
+            _ => {}
+        }
 
         let output_stderr;
         let borrowed: &ExecToolCallOutput = match &result {
@@ -988,8 +1117,14 @@ impl Session {
         }
 
         let now = Instant::now();
-        let mut state = self.state.lock().await;
-        state.check_repeat_command(command, now)
+        let blocked = {
+            let mut state = self.state.lock().await;
+            state.check_repeat_command(command, now)
+        };
+        if blocked.is_some() {
+            self.record_turn_command_blocked().await;
+        }
+        blocked
     }
 
     async fn record_repeat_command_result(&self, command: &[String], output: &ExecToolCallOutput) {
@@ -2987,6 +3122,81 @@ fn format_exec_output_str(exec_output: &ExecToolCallOutput) -> String {
     result.push_str(tail_part);
 
     result
+}
+
+fn truncate_string_to_bytes(text: &mut String, max_bytes: usize) {
+    if max_bytes == 0 {
+        text.clear();
+        return;
+    }
+
+    if text.len() <= max_bytes {
+        return;
+    }
+
+    let keep = take_bytes_at_char_boundary(text.as_str(), max_bytes).len();
+    text.truncate(keep);
+}
+
+fn tail_string_to_last_lines(text: &mut String, max_lines: usize) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+
+    if max_lines == 0 {
+        let truncated = !text.is_empty();
+        text.clear();
+        return truncated;
+    }
+
+    let total_lines = count_lines(text);
+    if total_lines <= max_lines {
+        return false;
+    }
+
+    let mut skipped = 0;
+    let lines_to_skip = total_lines - max_lines;
+    let mut start_idx = 0;
+    for (idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            skipped += 1;
+            if skipped == lines_to_skip {
+                start_idx = idx + 1;
+                break;
+            }
+        }
+    }
+
+    if skipped < lines_to_skip {
+        // Input contained fewer newline delimiters than expected; fall back to keeping
+        // the entire string to avoid accidental data loss.
+        return false;
+    }
+
+    let tail = text[start_idx..].to_string();
+    *text = tail;
+    true
+}
+
+fn count_lines(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+
+    let newline_count = text.as_bytes().iter().filter(|&&b| b == b'\n').count();
+    if text.ends_with('\n') {
+        newline_count
+    } else {
+        newline_count + 1
+    }
+}
+
+fn truncated_notice(template: &str, max_bytes: usize) -> String {
+    if max_bytes == 0 || template.is_empty() {
+        return String::new();
+    }
+
+    take_bytes_at_char_boundary(template, max_bytes).to_string()
 }
 
 // Truncate a &str to a byte budget at a char boundary (prefix)

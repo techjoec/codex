@@ -85,7 +85,15 @@ pub(crate) async fn handle_read_code_tool_call(
                 path = args.path
             ))
         })?;
-    validate_within_workspace(&canonical_path, &turn_context.cwd)?;
+    let workspace_root = tokio::fs::canonicalize(&turn_context.cwd)
+        .await
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "failed to resolve workspace root {path}: {err}",
+                path = turn_context.cwd.display()
+            ))
+        })?;
+    validate_within_workspace(&canonical_path, &workspace_root)?;
 
     let metadata = tokio::fs::metadata(&canonical_path).await.map_err(|err| {
         FunctionCallError::RespondToModel(format!(
@@ -111,7 +119,7 @@ pub(crate) async fn handle_read_code_tool_call(
         })?;
 
     if raw_contents.is_empty() {
-        let rel_path = display_path(&canonical_path, &turn_context.cwd);
+        let rel_path = display_path(&canonical_path, &workspace_root);
         return Ok(format!("path: {rel_path}\n[notice] file is empty"));
     }
 
@@ -156,7 +164,7 @@ pub(crate) async fn handle_read_code_tool_call(
         requested_max_bytes.min(DEFAULT_MAX_BYTES)
     };
 
-    let rel_path = display_path(&canonical_path, &turn_context.cwd);
+    let rel_path = display_path(&canonical_path, &workspace_root);
 
     let (uncovered_ranges, had_overlap) = sess
         .compute_unserved_code_ranges(&rel_path, &contextualized)

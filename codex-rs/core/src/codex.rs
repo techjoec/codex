@@ -571,13 +571,18 @@ impl Session {
         path: &str,
         ranges: &[(usize, usize)],
     ) -> (Vec<(usize, usize)>, bool) {
-        let state = self.state.lock().await;
-        state.compute_unserved_code_ranges(path, ranges)
+        let Some(turn_state) = self.current_turn_state().await else {
+            return (ranges.to_vec(), false);
+        };
+        let guard = turn_state.lock().await;
+        guard.compute_unserved_code_ranges(path, ranges)
     }
 
     pub(crate) async fn record_served_code_ranges(&self, path: &str, ranges: &[(usize, usize)]) {
-        let mut state = self.state.lock().await;
-        state.record_served_code_ranges(path, ranges);
+        if let Some(turn_state) = self.current_turn_state().await {
+            let mut guard = turn_state.lock().await;
+            guard.record_served_code_ranges(path, ranges);
+        }
     }
 
     async fn apply_turn_output_budget(&self, output: &mut ExecToolCallOutput) {

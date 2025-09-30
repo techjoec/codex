@@ -165,7 +165,7 @@ pub(crate) async fn handle_read_code_tool_call(
     if uncovered_ranges.is_empty() {
         let mut output = format!("path: {rel_path}\n");
         output.push_str(
-            "[notice] all requested lines were already provided earlier in this session; nothing new to show",
+            "[notice] all requested lines were already provided earlier in this turn; nothing new to show",
         );
         return Ok(output);
     }
@@ -188,7 +188,7 @@ pub(crate) async fn handle_read_code_tool_call(
     let mut notices = Vec::new();
     if had_overlap && overlap_lines > 0 {
         notices.push(format!(
-            "trimmed {overlap_lines} line(s) that were already served earlier in this session"
+            "trimmed {overlap_lines} line(s) that were already served earlier in this turn"
         ));
     }
     if truncated_by_lines {

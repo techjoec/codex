@@ -77,6 +77,14 @@ pub(crate) async fn handle_read_code_tool_call(
     }
 
     let resolved_path = turn_context.resolve_path(Some(args.path.clone()));
+    let resolved_path = tokio::fs::canonicalize(&resolved_path)
+        .await
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "failed to resolve {path}: {err}",
+                path = args.path
+            ))
+        })?;
     validate_within_workspace(&resolved_path, &turn_context.cwd)?;
 
     let metadata = tokio::fs::metadata(&resolved_path).await.map_err(|err| {
@@ -189,7 +197,7 @@ pub(crate) async fn handle_read_code_tool_call(
         ));
     }
 
-    let (content, served_ranges, truncated_by_bytes) =
+    let (mut content, mut served_ranges, truncated_by_bytes) =
         build_content(&line_limited_ranges, &line_slices, max_bytes_limit);
 
     if served_ranges.is_empty() {
@@ -202,18 +210,49 @@ pub(crate) async fn handle_read_code_tool_call(
 
     if truncated_by_bytes {
         notices.push(format!(
-            "truncated to {max_bytes_limit} byte(s); request /relax for a temporary increase"
+            "truncated to {max_bytes_limit} byte(s); request /relax for a temporary increase",
         ));
     }
 
-    let mut header = format!("path: {rel_path}\n");
-    for notice in &notices {
-        header.push_str("[notice] ");
-        header.push_str(notice);
-        header.push('\n');
+    let mut header = build_header(&rel_path, &notices);
+    let header_bytes = header.len();
+    let mut blank_line_bytes = 0usize;
+    if !content.is_empty() {
+        if !header.ends_with('\n') {
+            blank_line_bytes += 1;
+        }
+        blank_line_bytes += 1;
+    }
+    let prefix_bytes = header_bytes + blank_line_bytes;
+    let desired_bytes = prefix_bytes + content.len();
+    let notice_len = TURN_OUTPUT_TRUNCATION_NOTICE.len();
+
+    let reserve_decision = sess
+        .reserve_tool_output_budget(desired_bytes, notice_len)
+        .await;
+
+    let allowed_output_bytes = reserve_decision
+        .as_ref()
+        .map(|decision| decision.allowed_content_bytes)
+        .unwrap_or(desired_bytes);
+
+    let allowed_content_bytes = allowed_output_bytes.saturating_sub(prefix_bytes);
+
+    if allowed_content_bytes < content.len() {
+        let (new_content, new_served_ranges, _) =
+            build_content(&line_limited_ranges, &line_slices, allowed_content_bytes);
+        content = new_content;
+        served_ranges = new_served_ranges;
+        if served_ranges.is_empty() {
+            notices.push(
+                "byte budget exhausted before any new lines could be served; narrow the range or request /relax"
+                    .to_string(),
+            );
+            header = build_header(&rel_path, &notices);
+        }
     }
 
-    let mut output = header;
+    let mut output = header.clone();
     if !content.is_empty() {
         if !output.ends_with('\n') {
             output.push('\n');
@@ -222,15 +261,12 @@ pub(crate) async fn handle_read_code_tool_call(
         output.push_str(&content);
     }
 
-    sess.record_served_code_ranges(&rel_path, &served_ranges)
-        .await;
+    if !served_ranges.is_empty() {
+        sess.record_served_code_ranges(&rel_path, &served_ranges)
+            .await;
+    }
 
-    let desired_bytes = output.as_bytes().len();
-    let notice_len = TURN_OUTPUT_TRUNCATION_NOTICE.len();
-    if let Some(decision) = sess
-        .reserve_tool_output_budget(desired_bytes, notice_len)
-        .await
-    {
+    if let Some(decision) = reserve_decision {
         if decision.truncated {
             truncate_string_to_bytes(&mut output, decision.allowed_content_bytes);
             let notice = truncated_notice(TURN_OUTPUT_TRUNCATION_NOTICE, decision.notice_bytes);
@@ -244,6 +280,16 @@ pub(crate) async fn handle_read_code_tool_call(
     }
 
     Ok(output)
+}
+
+fn build_header(rel_path: &str, notices: &[String]) -> String {
+    let mut header = format!("path: {rel_path}\n");
+    for notice in notices {
+        header.push_str("[notice] ");
+        header.push_str(notice);
+        header.push('\n');
+    }
+    header
 }
 
 fn normalize_ranges(ranges: &mut Vec<(usize, usize)>) -> Result<(), FunctionCallError> {
@@ -346,8 +392,8 @@ fn build_content(
             continue;
         };
         let label = format!("lines {start}-{end}:\n");
-        let label_len = label.as_bytes().len();
-        let first_line_len = first_line.as_bytes().len();
+        let label_len = label.len();
+        let first_line_len = first_line.len();
 
         let mut required = label_len + first_line_len;
         if !first_segment && !content.ends_with('\n') {
@@ -372,7 +418,7 @@ fn build_content(
             let Some(text) = lines.get(line_idx - 1) else {
                 break;
             };
-            let len = text.as_bytes().len();
+            let len = text.len();
             if used + len > max_bytes {
                 truncated = true;
                 break;
@@ -423,7 +469,7 @@ fn truncate_string_to_bytes(text: &mut String, max_bytes: usize) {
         text.clear();
         return;
     }
-    if text.as_bytes().len() <= max_bytes {
+    if text.len() <= max_bytes {
         return;
     }
     let keep = take_bytes_at_char_boundary(text.as_str(), max_bytes).len();

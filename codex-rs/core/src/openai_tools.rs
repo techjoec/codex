@@ -275,6 +275,70 @@ fn create_view_image_tool() -> OpenAiTool {
         },
     })
 }
+
+fn create_read_code_tool() -> OpenAiTool {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "path".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "File path relative to the workspace root (or absolute inside the workspace)."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "lines".to_string(),
+        JsonSchema::Array {
+            items: Box::new(JsonSchema::Number {
+                description: Some(
+                    "Two-element array [start, end] specifying the inclusive 1-indexed line range."
+                        .to_string(),
+                ),
+            }),
+            description: Some(
+                "Optional inclusive line range [start, end]; omit to read the file from the beginning."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "context".to_string(),
+        JsonSchema::Number {
+            description: Some(
+                "Optional number of context lines to include before and after the requested range."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "max_bytes".to_string(),
+        JsonSchema::Number {
+            description: Some(
+                "Optional byte budget override (capped at 8192, or 16384 for small files)."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "symbol".to_string(),
+        JsonSchema::String {
+            description: Some("Reserved for future symbol lookup support.".to_string()),
+        },
+    );
+
+    OpenAiTool::Function(ResponsesApiTool {
+        name: "read_code".to_string(),
+        description: "Read code snippets from a file with enforced byte and line limits."
+            .to_string(),
+        strict: true,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["path".to_string()]),
+            additional_properties: Some(false),
+        },
+    })
+}
 /// TODO(dylan): deprecate once we get rid of json tool
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ApplyPatchToolArgs {
@@ -518,6 +582,8 @@ pub(crate) fn get_openai_tools(
         }
     }
 
+    tools.push(create_read_code_tool());
+
     if config.web_search_request {
         tools.push(OpenAiTool::WebSearch {});
     }
@@ -593,7 +659,13 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "update_plan", "web_search", "view_image"],
+            &[
+                "unified_exec",
+                "update_plan",
+                "read_code",
+                "web_search",
+                "view_image",
+            ],
         );
     }
 
@@ -613,7 +685,13 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "update_plan", "web_search", "view_image"],
+            &[
+                "unified_exec",
+                "update_plan",
+                "read_code",
+                "web_search",
+                "view_image",
+            ],
         );
     }
 
@@ -671,6 +749,7 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "read_code",
                 "web_search",
                 "view_image",
                 "test_server/do_something_cool",
@@ -678,7 +757,7 @@ mod tests {
         );
 
         assert_eq!(
-            tools[3],
+            tools[4],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "test_server/do_something_cool".to_string(),
                 parameters: JsonSchema::Object {
@@ -789,6 +868,7 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "read_code",
                 "view_image",
                 "test_server/cool",
                 "test_server/do",
@@ -835,11 +915,17 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "web_search", "view_image", "dash/search"],
+            &[
+                "unified_exec",
+                "read_code",
+                "web_search",
+                "view_image",
+                "dash/search",
+            ],
         );
 
         assert_eq!(
-            tools[3],
+            tools[4],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/search".to_string(),
                 parameters: JsonSchema::Object {
@@ -894,10 +980,16 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "web_search", "view_image", "dash/paginate"],
+            &[
+                "unified_exec",
+                "read_code",
+                "web_search",
+                "view_image",
+                "dash/paginate",
+            ],
         );
         assert_eq!(
-            tools[3],
+            tools[4],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/paginate".to_string(),
                 parameters: JsonSchema::Object {
@@ -950,10 +1042,16 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "web_search", "view_image", "dash/tags"],
+            &[
+                "unified_exec",
+                "read_code",
+                "web_search",
+                "view_image",
+                "dash/tags",
+            ],
         );
         assert_eq!(
-            tools[3],
+            tools[4],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/tags".to_string(),
                 parameters: JsonSchema::Object {
@@ -1009,10 +1107,16 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "web_search", "view_image", "dash/value"],
+            &[
+                "unified_exec",
+                "read_code",
+                "web_search",
+                "view_image",
+                "dash/value",
+            ],
         );
         assert_eq!(
-            tools[3],
+            tools[4],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/value".to_string(),
                 parameters: JsonSchema::Object {

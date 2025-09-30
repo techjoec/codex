@@ -1,84 +1,95 @@
-# Codex Context Optimization Implementation Plan
+# Codex Context Optimization — Codex-Ready Action Plan
 
-## 1. Background and Problem Statement
-- The optimization briefing emphasizes that redundant `sed_range` reads, oversized build logs, and whole-file dumps inflate context usage even when prompt caching performs well, underscoring the need to curb raw bytes injected per turn. 【F:our-docs/CONVERSATION_NOTES.md†L24-L31】
-- The package compiled on 2025-09-29 positions the program around suppressing repeat reads, shrinking tool outputs, and stabilizing the prompt prefix without relying on API-key metering. 【F:our-docs/CONVERSATION_NOTES.md†L8-L31】【F:our-docs/README.md†L1-L7】
+The action plan is organized into intensive Codex execution sessions. Each session can be completed in a single, focused push with room for iteration, testing, and guardrail validation. Sessions list prerequisites, deliverables, and embedded cautions so future Codex agents can select the next actionable block with minimal re-planning.
 
-## 2. Target Outcomes and Success Criteria
-- Reduce persisted tool bytes by at least 55%, with expected savings of ~55–60% when line caps, log tailing, and output compaction are enforced. 【F:our-docs/CONVERSATION_NOTES.md†L38-L42】
-- Drive duplicate `sed_range` lines per session to ≈0% via overlap suppression, while preventing context overflows and keeping prompt-prefix cache hits stable or improving. 【F:our-docs/CONVERSATION_NOTES.md†L118-L123】
-- Maintain developer ergonomics by providing explicit `/relax` escape hatches and a once-per-turn large-slice allowance for small files. 【F:our-docs/policy/context_policy.yaml†L2-L20】【F:our-docs/CONVERSATION_NOTES.md†L134-L138】
-
-## 3. Implementation Phases and Detailed Workstreams
-
-### Phase 1 – Guardrails and Output Budgets (Immediate)
-1. **Tool-output caps** *(In progress)*
-   - ✅ `read_code` handler enforces ≤8 KB / language-specific line caps with a small-file exception. 【F:core/src/tool_read_code.rs†L1-L249】
-   - ✅ Exec tool output clamps 6 KB generic output and 8 KB `rg` runs with truncation notices to steer callers toward narrower commands. 【F:codex-rs/core/src/exec.rs†L26-L220】【F:codex-rs/core/src/exec.rs†L321-L438】
-   - ✅ Per-turn budgeting trims aggregated exec output against a 24 KB per-turn budget and appends concise notices once exhausted. 【F:codex-rs/core/src/state/turn.rs†L1-L218】【F:codex-rs/core/src/codex.rs†L940-L1050】
-2. **Command gating** *(Partially complete)*
-   - ✅ Removed `cat`/`nl` from the safe list and reject full-file reads >4 KB with guidance to call `read_code`. 【F:core/src/command_safety/is_safe_command.rs†L17-L198】【F:core/src/codex.rs†L2550-L2874】
-   - ✅ Build tool tail wrappers tee build/test commands, serve the final 120 lines, and record tail metrics. 【F:codex-rs/core/src/exec.rs†L45-L218】【F:codex-rs/core/src/codex.rs†L604-L639】【F:codex-rs/core/src/state/turn.rs†L87-L105】
-3. **Repeat-command breaker**
-   - ✅ Session-scoped breaker tracks hashed output per command and blocks the third identical run within 120 seconds, emitting background guidance with the latest output preview to encourage narrower follow-ups. 【F:codex-rs/core/src/state/session.rs†L1-L214】【F:codex-rs/core/src/codex.rs†L900-L1016】【F:codex-rs/core/src/codex.rs†L2607-L2651】
-4. **Telemetry hooks**
-   - ✅ Session completion now logs per-turn metrics covering bytes served, bytes trimmed, truncated outputs, blocked commands, and log-tail placeholders for A/B analysis. 【F:codex-rs/core/src/state/turn.rs†L154-L222】【F:codex-rs/core/src/tasks/mod.rs†L20-L120】【F:codex-rs/core/src/codex.rs†L520-L620】
-
-### Phase 2 – `read_code` Tool and Overlap Suppression (High Leverage)
-1. **Tool registration** *(Done)*
-   - ✅ Added a strict JSON `read_code` tool and updated prompt-caching expectations. 【F:core/src/openai_tools.rs†L240-L548】【F:core/tests/suite/prompt_caching.rs†L210-L235】
-2. **Range-serving engine** *(Pending follow-up)*
-   - ☐ Current handler reads ranges with byte/line budgeting but does not yet track `(path, git_oid)` intervals.
-3. **Policy enforcement** *(Partially complete)*
-   - ✅ Enforce per-call byte/line limits plus small-file exception. 【F:core/src/tool_read_code.rs†L1-L249】
-   - ☐ Per-turn budget accounting and `/relax` toggle integration remain open.
-4. **History compaction**
-   - Update the transcript compactor to retroactively replace raw byte dumps with `{path,[a,b],oid,chunk_ids}` references so cached prefixes stabilize across turns. 【F:our-docs/CONVERSATION_NOTES.md†L89-L95】
-
-### Phase 3 – Two-pass Context Query Planning (Stabilization)
-1. **Planner schema**
-   - Require the agent to emit a bounded JSON plan enumerating target files, ranges, symbols, and budgets before executing read operations. 【F:our-docs/CONVERSATION_NOTES.md†L66-L69】
-2. **Executor integration**
-   - Execute the approved plan via `read_code`, ensuring cumulative reads stay within per-turn limits and reuse existing overlap suppression.
-3. **Fallback & UX**
-   - Provide structured error messaging when the plan exceeds budgets, directing use of `/relax` or narrower scopes; log plan-vs-actual metrics for experimentation. 【F:our-docs/policy/context_policy.yaml†L15-L18】【F:our-docs/CONVERSATION_NOTES.md†L134-L138】
-
-### Phase 4 – Diff-first Editing with Quiet Patch Acks (Prompt Stability)
-1. **Tooling constraints**
-   - Make `apply_patch` the sole editing pathway, forbidding shell-based patch streaming. The tool should acknowledge success with concise metadata only, eliminating large patch echoes. 【F:our-docs/CONVERSATION_NOTES.md†L70-L72】
-2. **Workflow updates**
-   - Document the new editing flow in CLI guidance and ensure downstream analytics treat these acknowledgments as zero-byte for prompt persistence.
-
-### Phase 5 – Context Virtual Memory (Scalability)
-1. **Content-addressable index**
-   - Build a Git-anchored cache of 4–8 KB line-aware chunks to serve `read_code` slices deterministically and minimize redundant disk I/O. 【F:our-docs/CONVERSATION_NOTES.md†L73-L75】
-2. **Dirty-file handling**
-   - Hash dirty buffers and track `(size, mtime)` metadata to invalidate affected chunks without blowing away the entire index. 【F:our-docs/CONVERSATION_NOTES.md†L135-L139】
-
-### Phase 6 – Observability and Experimentation (Ongoing)
-1. **Metrics surfacing**
-   - Emit per-turn counters (bytes, overlap trimmed, blocked reads, repeat-command events) and expose flags `--no-overlap-trim`, `--no-two-pass`, and `--no-build-tail` for controlled rollouts. 【F:our-docs/CONVERSATION_NOTES.md†L76-L79】
-2. **A/B harness**
-   - Build dashboards comparing persisted bytes, cache-hit rates, latency, and agent success across cohorts to validate each phase before broad release.
-
-## 4. Cross-cutting Considerations and Opinions
-- **Developer experience:** Prioritize clear agent messaging when caps trigger; integrate inline guidance suggesting narrower ranges or symbol lookups to avoid frustrating retry loops. 【F:our-docs/CONVERSATION_NOTES.md†L54-L65】
-- **Risk mitigation:** Guard against context loss by honoring the large-slice exception and adding forthcoming `read_symbol` helpers; keep full logs on disk with `show log` affordances for manual inspection. 【F:our-docs/CONVERSATION_NOTES.md†L134-L139】
-- **Testing strategy:** Stage guardrails behind feature flags, run scenario-based acceptance (large repos, high-churn diffs), and verify token savings with synthetic workloads before rollout.
-- **Change management:** Socialize policy defaults and editing constraints with the developer community early, incorporating feedback loops to adjust caps per language if ergonomic friction emerges. 【F:our-docs/policy/context_policy.yaml†L2-L20】
-
-## 5. Execution Timeline (Suggested)
-1. **Week 1:** Implement Phase 1 guardrails and telemetry; launch limited beta to quantify immediate byte reductions.
-2. **Week 2:** Deliver `read_code`, overlap suppression, and history compaction; validate duplicate-line elimination and adjust caps as needed.
-3. **Week 3:** Introduce planner turn with opt-in flag; collect usability feedback and iterate on error messaging.
-4. **Week 4:** Enforce diff-first editing; finalize documentation and developer training materials.
-5. **Weeks 5–6:** Develop and integrate CVM cache; begin broader rollout backed by observability dashboards.
-6. **Beyond:** Continue metrics-driven tuning, refine per-extension caps, and explore adaptive budgeting informed by session-level behavior analytics. 【F:our-docs/CONVERSATION_NOTES.md†L143-L147】
-
-## 6. Definition of Done
-- Guardrails, `read_code`, planner, and patch-ack updates deployed with feature flags and validated savings meeting ≥55% persisted-byte reduction target. 【F:our-docs/patches/IMPLEMENTATION_PLAN.md†L4-L5】【F:our-docs/CONVERSATION_NOTES.md†L118-L123】
-- Observability suite exposes overlap, budget, and repeat-command metrics; dashboards confirm sustained prompt-prefix stability.
-- Documentation (policy files, developer guides) aligns with enforced limits and provides clear override instructions.
+## Global Objectives and Guardrails
+- Hit ≥55% reduction in persisted tool bytes by enforcing read caps, trimming logs, and compacting transcripts. 【F:our-docs/CONVERSATION_NOTES.md†L24-L42】
+- Drive duplicate `sed_range` reads to ~0% through overlap suppression without hurting prompt cache hit rates. 【F:our-docs/CONVERSATION_NOTES.md†L89-L123】
+- Preserve ergonomics via `/relax` escape hatches and a once-per-turn large-slice allowance for small files. 【F:our-docs/policy/context_policy.yaml†L2-L20】【F:our-docs/CONVERSATION_NOTES.md†L134-L138】
 
 ---
-Prepared as KSP-PLAN.md to capture the actionable roadmap and personal guidance for implementing the Codex context optimization program.
+
+## Session A — Guardrails & Output Budget Hardening
+- **Scope:** Finalize immediate guardrails, turn budgeting, and telemetry introduced in prior work so they withstand production load.
+- **Entry Conditions:** Existing clamps and command gating are merged but need verification, polish, and expanded coverage. 【F:codex-rs/core/src/exec.rs†L26-L438】【F:codex-rs/core/src/state/turn.rs†L1-L218】
+- **Exit Criteria:** All guardrails emit actionable messages, persist metrics, and reject bypass attempts while keeping `/relax` functionality ready for later phases.
+- **Subtasks:**
+  1. Audit truncation messaging for exec, `rg`, and per-turn budgets; ensure consistent phrasing and small-file exception callouts. 【F:codex-rs/core/src/codex.rs†L520-L1050】
+  2. Validate repeat-command breaker behavior under concurrent commands; add regression tests for hashed output collision handling. 【F:codex-rs/core/src/state/session.rs†L1-L214】
+  3. Extend telemetry payloads with command context for upcoming dashboards (bytes served/trimmed, truncated outputs, breaker trips). 【F:codex-rs/core/src/tasks/mod.rs†L20-L120】
+- **Warnings:** Avoid widening truncation caps; optimize messaging instead. Respect existing safe-command denylist changes (no `cat`/`nl`). 【F:core/src/command_safety/is_safe_command.rs†L17-L198】
+- **Dependencies:** None; this session establishes the hardened baseline for all subsequent work.
+
+---
+
+## Session B — `read_code` Overlap Suppression & History Compaction
+- **Scope:** Finish `read_code` session accounting and transcript compaction so repeated slices are eliminated and caching stabilizes.
+- **Entry Conditions:** Tool registration and per-call caps ship; per-turn accounting and overlap tracking remain unimplemented. 【F:core/src/tool_read_code.rs†L1-L249】
+- **Exit Criteria:** Transcript history stores `{path,[a,b],oid,chunk_ids}` references, per-turn budgets exist, and `/relax` toggles integrate cleanly.
+- **Subtasks:**
+  1. Implement `(path, git_oid)` interval tracking with interval trees to block redundant reads within the same turn; add targeted tests. 
+  2. Hook range-serving engine into turn budget accounting; surface concise notices when limits hit and allow one `/relax` override per turn. 【F:our-docs/policy/context_policy.yaml†L15-L18】
+  3. Update transcript compactor to retroactively replace raw slices with structured references; verify prompt cache stability in prompt-caching suite. 【F:core/tests/suite/prompt_caching.rs†L210-L235】【F:our-docs/CONVERSATION_NOTES.md†L89-L95】
+- **Warnings:** Maintain small-file exception semantics; ensure `/relax` escape is logged for observability. Avoid introducing new IO-heavy primitives.
+- **Dependencies:** Session A complete (telemetry fields leveraged for compaction validation).
+
+---
+
+## Session C — Two-pass Context Query Planning
+- **Scope:** Require Codex to declare read intent before execution, validating budgets and reuse of overlap suppression.
+- **Entry Conditions:** Overlap tracking and transcript compaction live. Planner scaffolding absent.
+- **Exit Criteria:** Agent emits bounded JSON plan, executor validates budgets, UX handles plan rejection gracefully.
+- **Subtasks:**
+  1. Define planner schema (files, ranges, symbols, byte budget) and integrate into OpenAI tool set. 【F:our-docs/CONVERSATION_NOTES.md†L66-L69】
+  2. Implement plan validator that enforces per-turn limits, reuses overlap data, and halts execution when budgets would be exceeded.
+  3. Add fallback UX with actionable errors, `/relax` guidance, and plan-vs-actual metrics instrumentation. 【F:our-docs/CONVERSATION_NOTES.md†L134-L138】
+- **Warnings:** Ensure planner cannot bypass small-file exception misuse; reject recursive planner invocations.
+- **Dependencies:** Sessions A & B deliver guardrails and overlap primitives used here.
+
+---
+
+## Session D — Diff-first Editing & Quiet Patch Acknowledgments
+- **Scope:** Force editing through `apply_patch`, mute patch echoes, and update CLI UX to reflect new workflow.
+- **Entry Conditions:** Shell-based patch streaming still possible; acknowledgments echo full patches.
+- **Exit Criteria:** `apply_patch` is sole edit tool, responses include minimal metadata, and CLI docs steer users appropriately.
+- **Subtasks:**
+  1. Enforce policy: block shell-based patch commands and ensure tooling errors reference `apply_patch` guidance. 【F:our-docs/CONVERSATION_NOTES.md†L70-L72】
+  2. Modify `apply_patch` response path to emit concise success payloads (no diff body) while preserving failure diagnostics.
+  3. Update CLI developer guidance to explain diff-first editing and quiet acknowledgments; tag documentation for Codex consumers only.
+- **Warnings:** Preserve debugging affordances—ensure logs remain accessible via `show log`. 【F:our-docs/CONVERSATION_NOTES.md†L134-L139】
+- **Dependencies:** Sessions A–C deliver context-limiting policies that editing UX must respect.
+
+---
+
+## Session E — Context Virtual Memory (CVM) Cache
+- **Scope:** Add Git-anchored, content-addressed chunk cache serving deterministic `read_code` responses with dirty-file invalidation.
+- **Entry Conditions:** Overlap suppression, planner, and diff-first editing in place. No chunk cache yet.
+- **Exit Criteria:** CVM cache serves 4–8 KB line-aware chunks, handles dirty buffers, and surfaces metrics for cache hits/misses.
+- **Subtasks:**
+  1. Design content-addressable index keyed by `(repo_oid, path, chunk_range)`; ensure deterministic slicing for prompt cache synergy. 【F:our-docs/CONVERSATION_NOTES.md†L73-L75】
+  2. Implement dirty-file tracking via hash + `(size, mtime)` metadata with targeted invalidation routines. 【F:our-docs/CONVERSATION_NOTES.md†L135-L139】
+  3. Instrument cache hit/miss counters and wire into telemetry to support rollout gating.
+- **Warnings:** Avoid large upfront indexing; build lazily on-demand to respect per-turn budgets.
+- **Dependencies:** Sessions B & C supply overlap metadata consumed by CVM.
+
+---
+
+## Session F — Observability & Experimentation Rollout
+- **Scope:** Expose collected metrics, ship rollout flags, and create A/B harness to validate savings before broad launch.
+- **Entry Conditions:** Telemetry streams exist but lack surfaced dashboards and gating flags.
+- **Exit Criteria:** Operators can toggle overlap suppression, two-pass planner, build-tail trims, and observe impact across cohorts.
+- **Subtasks:**
+  1. Wire telemetry fields into surfaced metrics (CLI, dashboards, or log sinks) including bytes served/trimmed, overlap suppressed, repeat breaker trips. 【F:our-docs/CONVERSATION_NOTES.md†L76-L79】
+  2. Implement runtime flags `--no-overlap-trim`, `--no-two-pass`, `--no-build-tail` and ensure session metadata records flag usage.
+  3. Build lightweight A/B harness summarizing persisted bytes, cache-hit rates, latency, and agent success to validate phased rollouts.
+- **Warnings:** Keep dashboards lightweight and developer-facing; defer business reporting.
+- **Dependencies:** Sessions A–E generate the metrics that F visualizes.
+
+---
+
+## Ongoing Quality & Definition of Done
+- **Testing Strategy:** Feature-flag each major control, create synthetic large-repo scenarios, and verify prompt-caching suite stability. 【F:our-docs/patches/IMPLEMENTATION_PLAN.md†L4-L5】
+- **DoD:** Guardrails, `read_code`, planner, patch acknowledgments, CVM cache, and observability must collectively hit ≥55% persisted-byte reduction while keeping prompt prefixes stable. 【F:our-docs/CONVERSATION_NOTES.md†L118-L147】
+- **Documentation:** Limit updates to Codex-facing developer guidance that describe new tool behavior and escape hatches; avoid broader business process docs.
+
+Prepared for Codex agents as a focused execution roadmap based solely on the current KSP inputs.

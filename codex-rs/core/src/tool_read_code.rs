@@ -76,8 +76,8 @@ pub(crate) async fn handle_read_code_tool_call(
         ));
     }
 
-    let resolved_path = turn_context.resolve_path(Some(args.path.clone()));
-    let resolved_path = tokio::fs::canonicalize(&resolved_path)
+    let candidate_path = turn_context.resolve_path(Some(args.path.clone()));
+    let canonical_path = tokio::fs::canonicalize(&candidate_path)
         .await
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!(
@@ -85,9 +85,9 @@ pub(crate) async fn handle_read_code_tool_call(
                 path = args.path
             ))
         })?;
-    validate_within_workspace(&resolved_path, &turn_context.cwd)?;
+    validate_within_workspace(&canonical_path, &turn_context.cwd)?;
 
-    let metadata = tokio::fs::metadata(&resolved_path).await.map_err(|err| {
+    let metadata = tokio::fs::metadata(&canonical_path).await.map_err(|err| {
         FunctionCallError::RespondToModel(format!(
             "failed to read metadata for {path}: {err}",
             path = args.path
@@ -101,7 +101,7 @@ pub(crate) async fn handle_read_code_tool_call(
         )));
     }
 
-    let raw_contents = tokio::fs::read_to_string(&resolved_path)
+    let raw_contents = tokio::fs::read_to_string(&canonical_path)
         .await
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!(
@@ -111,7 +111,7 @@ pub(crate) async fn handle_read_code_tool_call(
         })?;
 
     if raw_contents.is_empty() {
-        let rel_path = display_path(&resolved_path, &turn_context.cwd);
+        let rel_path = display_path(&canonical_path, &turn_context.cwd);
         return Ok(format!("path: {rel_path}\n[notice] file is empty"));
     }
 
@@ -156,7 +156,7 @@ pub(crate) async fn handle_read_code_tool_call(
         requested_max_bytes.min(DEFAULT_MAX_BYTES)
     };
 
-    let rel_path = display_path(&resolved_path, &turn_context.cwd);
+    let rel_path = display_path(&canonical_path, &turn_context.cwd);
 
     let (uncovered_ranges, had_overlap) = sess
         .compute_unserved_code_ranges(&rel_path, &contextualized)
@@ -261,11 +261,6 @@ pub(crate) async fn handle_read_code_tool_call(
         output.push_str(&content);
     }
 
-    if !served_ranges.is_empty() {
-        sess.record_served_code_ranges(&rel_path, &served_ranges)
-            .await;
-    }
-
     if let Some(decision) = reserve_decision {
         if decision.truncated {
             truncate_string_to_bytes(&mut output, decision.allowed_content_bytes);
@@ -277,6 +272,11 @@ pub(crate) async fn handle_read_code_tool_call(
                 output.push_str(&notice);
             }
         }
+    }
+
+    if !served_ranges.is_empty() {
+        sess.record_served_code_ranges(&rel_path, &served_ranges)
+            .await;
     }
 
     Ok(output)
